@@ -1,0 +1,217 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { runInNewContext } from 'node:vm';
+import { Context, Service } from '@deepseek-ai/cordis';
+import { buildClientSource } from '../scripts/build-client.js';
+
+const clientSource = await buildClientSource();
+const State = { PENDING: 0, LOADING: 1, ACTIVE: 2, FAILED: 3, DISPOSED: 4 };
+const slotKey = options => `${options.name}:${options.key || options.id || ''}`;
+
+function loadPlugin() {
+  let entry;
+  runInNewContext(clientSource, {
+    window: {
+      __ModuleLoader__: {
+        load: value => {
+          entry = value;
+        },
+      },
+    },
+    console,
+    setTimeout,
+    clearTimeout,
+  });
+  assert.equal(entry.id, 'dsh-session-edit');
+  return entry.factory(name => {
+    assert.equal(name, 'react');
+    return {
+      createElement: (type, props, ...children) => ({ type, props, children }),
+      useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+      useState: value => [value, () => {}],
+      useEffect() {},
+      useRef: value => ({ current: value }),
+      useMemo: factory => factory(),
+    };
+  });
+}
+
+function fixture(t, { lateNamespace = false, deferredMount = false } = {}) {
+  const ctx = new Context();
+  const slots = new Map();
+  const dictionaries = new Map();
+  const fibers = new Set();
+  const errors = [];
+  const counts = { mounts: 0, calls: 0, removedSlots: 0, removedLocale: 0 };
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  if (!deferredMount) gate.resolve();
+
+  ctx.logger.exporter({
+    export(message) {
+      if (message.type === 'error') errors.push(...message.args);
+    },
+  });
+  ctx.on('internal/plugin', fiber => fibers.add(fiber));
+
+  class Slots extends Service {
+    constructor() {
+      super(ctx, 'slots');
+    }
+    inject(_name, callback) {
+      return this.ctx.effect(callback);
+    }
+    register(options, component) {
+      return this.ctx.effect(() => {
+        const key = slotKey(options);
+        assert.equal(slots.has(key), false);
+        slots.set(key, { ...options, component, owner: this.ctx.fiber });
+        return () => {
+          slots.delete(key);
+          counts.removedSlots++;
+        };
+      });
+    }
+  }
+
+  class Locale extends Service {
+    constructor() {
+      super(ctx, 'locale');
+    }
+    register(namespace, values) {
+      dictionaries.set(namespace, values);
+      return () => {
+        dictionaries.delete(namespace);
+        counts.removedLocale++;
+      };
+    }
+    bind(namespace) {
+      return key => dictionaries.get(namespace).en[key];
+    }
+    subscribe() {
+      return () => {};
+    }
+    getSnapshot() {
+      return 'en';
+    }
+  }
+
+  function provideNamespace(owner) {
+    return owner.provide(
+      'remote.sessionEdit',
+      Object.fromEntries(
+        ['inspect', 'execute'].map(name => [
+          name,
+          () => {
+            counts.calls++;
+            assert.fail(`Startup unexpectedly called ${name}`);
+          },
+        ]),
+      ),
+    );
+  }
+
+  class Remote extends Service {
+    constructor() {
+      super(ctx, 'remote');
+    }
+    async $mount(contribution) {
+      counts.mounts++;
+      assert.equal(contribution.package, 'dsh-session-edit');
+      assert.deepEqual(
+        Array.from(contribution.descriptors, entry => entry.method),
+        ['inspect', 'execute'],
+      );
+      entered.resolve();
+      await gate.promise;
+      if (!lateNamespace) provideNamespace(this.ctx);
+    }
+  }
+
+  new Slots();
+  new Locale();
+  new Remote();
+  for (const name of ['uiSession', 'sessions']) ctx.provide(name, {});
+  ctx.provide('uiWorkspace', {
+    openSession() {
+      assert.fail('Startup must never navigate');
+    },
+  });
+
+  const root = ctx.plugin(loadPlugin());
+  t.after(async () => {
+    gate.resolve();
+    await ctx.fiber.dispose();
+  });
+
+  return {
+    ctx,
+    root,
+    slots,
+    dictionaries,
+    errors,
+    counts,
+    entered: entered.promise,
+    release: gate.resolve,
+    children: () => [...fibers].filter(fiber => fiber.parent.fiber === root.ctx.fiber),
+    provideNamespace: () => provideNamespace(root.ctx),
+  };
+}
+
+async function settled(f) {
+  await f.root.await();
+  for (const child of f.children()) await child.await();
+}
+
+function mounted(f) {
+  assert.equal(f.root.state, State.ACTIVE);
+  assert.equal(f.slots.size, 5);
+  assert.ok(f.slots.has('conversation.chat.node:user'));
+  assert.ok(f.slots.has('conversation.chat.node:steering'));
+  assert.equal(f.slots.get('conversation.chat.node:user').priority, -100);
+  assert.ok(f.slots.has('conversation.composer.dock:dsh-session-edit.continue'));
+  assert.equal(f.dictionaries.size, 1);
+  assert.equal(f.counts.calls, 0);
+  assert.deepEqual(f.errors, []);
+}
+
+test('client waits for remote mount and releases all five UI entries on unload', async t => {
+  const f = fixture(t, { deferredMount: true });
+  await f.entered;
+  assert.equal(f.root.state, State.LOADING);
+  assert.equal(f.slots.size, 0);
+  f.release();
+  await settled(f);
+  mounted(f);
+  assert.equal(
+    f.slots.get('sidebar.workspaces.session.menu.item:dsh-session-edit.history').label(),
+    'Edit history / retry…',
+  );
+  await f.root.dispose();
+  assert.equal(f.slots.size, 0);
+  assert.equal(f.dictionaries.size, 0);
+  assert.equal(f.counts.removedSlots, 5);
+  assert.equal(f.counts.removedLocale, 1);
+  assert.equal(f.counts.calls, 0);
+});
+
+test('late RPC namespace and namespace restart correctly suspend and remount UI', async t => {
+  const f = fixture(t, { lateNamespace: true });
+  await settled(f);
+  assert.equal(f.children()[0].state, State.PENDING);
+  assert.equal(f.slots.size, 0);
+  const remove = f.provideNamespace();
+  await settled(f);
+  mounted(f);
+  await remove();
+  await settled(f);
+  assert.equal(f.slots.size, 0);
+  assert.equal(f.dictionaries.size, 0);
+  f.provideNamespace();
+  await settled(f);
+  mounted(f);
+  await f.root.dispose();
+  assert.equal(f.counts.removedSlots, 10);
+  assert.equal(f.counts.removedLocale, 2);
+  assert.deepEqual(f.errors, []);
+});

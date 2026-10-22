@@ -1,0 +1,268 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createClientController } from '../src/client-controller.js';
+
+const ok = value => ({ ok: true, value });
+const message = (eventSeq, text = `message ${eventSeq}`) => ({
+  eventSeq,
+  messageId: `message-${eventSeq}`,
+  text,
+  time: 100,
+  editable: true,
+});
+const target = { sessionId: 'source', eventSeq: 8, text: 'stale bubble text' };
+
+function fixture(overrides = {}) {
+  const calls = [];
+  const navigated = [];
+  const facts = {
+    sessionId: 'source',
+    title: 'Source conversation',
+    status: 'idle',
+    archived: false,
+    ordinary: true,
+    headSeq: 100,
+    messages: [message(30), message(40)],
+    nextBeforeSeq: 30,
+    continuation: { available: true, canSendPrompt: true, tailRole: 'assistant' },
+  };
+  const handlers = {
+    inspect: request =>
+      ok({
+        ...facts,
+        sessionId: request.sessionId,
+        ...(request.eventSeq === undefined
+          ? {}
+          : { messages: [message(request.eventSeq)], nextBeforeSeq: null }),
+      }),
+    execute: () => ok({ sourceSessionId: 'source', childSessionId: 'child' }),
+    ...overrides,
+  };
+  const rpc = Object.fromEntries(
+    Object.keys(handlers).map(name => [
+      name,
+      async request => {
+        calls.push({ name, request });
+        return handlers[name](request);
+      },
+    ]),
+  );
+  const controller = createClientController({
+    rpc,
+    navigate: id => navigated.push(id),
+    getLocale: () => 'en',
+  });
+  return { controller, calls, navigated, facts };
+}
+
+test('history prepends older pages using an exclusive raw event cursor', async () => {
+  const f = fixture({
+    inspect: request =>
+      ok({
+        ...f.facts,
+        messages:
+          request.beforeSeq === undefined ? [message(30), message(40)] : [message(5), message(30)],
+        nextBeforeSeq: request.beforeSeq === undefined ? 30 : null,
+      }),
+  });
+  await f.controller.openHistory('source');
+  await f.controller.loadOlder();
+  assert.deepEqual(
+    f.controller.getSnapshot().panel.messages.map(item => item.eventSeq),
+    [5, 30, 40],
+  );
+  assert.deepEqual(
+    f.calls.map(call => call.name),
+    ['inspect', 'inspect'],
+  );
+  assert.equal(f.calls[1].request.beforeSeq, 30);
+  f.controller.dispose();
+});
+
+test('editing resolves the exact message ID and submits from one dialog', async () => {
+  const f = fixture();
+  await f.controller.openEdit(target);
+  assert.deepEqual(f.calls[0].request, { sessionId: 'source', eventSeq: 8 });
+  assert.equal(f.controller.getSnapshot().panel.text, 'message 8');
+  f.controller.setText('changed $text\nsecond line');
+  await f.controller.submitEdit();
+  assert.deepEqual(
+    f.calls.map(call => call.name),
+    ['inspect', 'execute'],
+  );
+  assert.deepEqual(f.calls[1].request, {
+    sessionId: 'source',
+    action: 'edit-fork',
+    eventSeq: 8,
+    messageId: 'message-8',
+    replacementText: 'changed $text\nsecond line',
+  });
+  assert.equal(f.controller.getSnapshot().panel, null);
+  assert.deepEqual(f.navigated, ['child']);
+  f.controller.dispose();
+});
+
+test('retry is one action without opening a dialog and sends no replacement text', async () => {
+  const f = fixture();
+  f.facts.status = 'running';
+  await f.controller.retryMessage({ ...target, messageId: 'message-8' });
+  assert.deepEqual(f.calls, [
+    {
+      name: 'execute',
+      request: {
+        sessionId: 'source',
+        action: 'retry-fork',
+        eventSeq: 8,
+        messageId: 'message-8',
+      },
+    },
+  ]);
+  assert.equal(f.controller.getSnapshot().panel, null);
+  assert.deepEqual(f.navigated, ['child']);
+  f.controller.dispose();
+});
+
+test('double retry clicks share identity resolution and only submit once', async () => {
+  const gate = Promise.withResolvers();
+  const f = fixture({ inspect: () => gate.promise });
+  const first = f.controller.retryMessage(target);
+  const second = f.controller.retryMessage(target);
+  await Promise.resolve();
+  assert.equal(f.calls.length, 1);
+  gate.resolve(ok({ ...f.facts, messages: [message(8)] }));
+  await Promise.all([first, second]);
+  assert.equal(f.calls.filter(call => call.name === 'execute').length, 1);
+  assert.deepEqual(f.navigated, ['child']);
+  f.controller.dispose();
+});
+
+test('closing the editor while submitting prevents late navigation', async () => {
+  const gate = Promise.withResolvers();
+  const f = fixture({ execute: () => gate.promise });
+  await f.controller.openEdit({ ...target, messageId: 'message-8' });
+  f.controller.setText('edited text');
+  const task = f.controller.submitEdit();
+  await Promise.resolve();
+  assert.equal(f.controller.getSnapshot().panel.busy, true);
+  f.controller.close();
+  assert.equal(f.controller.getSnapshot().panel, null);
+  gate.resolve(ok({ sourceSessionId: 'source', childSessionId: 'late-child' }));
+  await task;
+  assert.equal(f.controller.getSnapshot().panel, null);
+  assert.deepEqual(f.navigated, []);
+  f.controller.dispose();
+});
+
+test('late identity lookup does not reopen an editor or overwrite another conversation', async () => {
+  const gate = Promise.withResolvers();
+  const f = fixture({
+    inspect: request =>
+      request.eventSeq !== undefined
+        ? gate.promise
+        : ok({ ...f.facts, sessionId: 'new', title: 'New' }),
+  });
+  const first = f.controller.openEdit(target);
+  f.controller.close();
+  await f.controller.openHistory('new');
+  gate.resolve(ok({ ...f.facts, messages: [message(8)] }));
+  await first;
+  assert.equal(f.controller.getSnapshot().panel.sessionId, 'new');
+  assert.equal(f.controller.getSnapshot().panel.title, 'New');
+  assert.equal(f.calls.filter(call => call.name === 'execute').length, 0);
+  f.controller.dispose();
+});
+
+test('a rejected edit keeps its draft in the same editable dialog', async () => {
+  const f = fixture({
+    execute: () => ({ ok: false, error: { code: 'session-edit/session-changed', message: 'Changed' } }),
+  });
+  await f.controller.openEdit({ ...target, messageId: 'message-8' });
+  f.controller.setText('draft to retain');
+  await f.controller.submitEdit();
+  assert.equal(f.controller.getSnapshot().panel.view, 'editor');
+  assert.equal(f.controller.getSnapshot().panel.text, 'draft to retain');
+  assert.equal(f.controller.getSnapshot().panel.busy, false);
+  assert.equal(f.controller.getSnapshot().panel.error.code, 'session-edit/session-changed');
+  f.controller.dispose();
+});
+
+test('a rejected one-click retry surfaces a notice when no dialog is open', async () => {
+  const f = fixture({
+    execute: () => ({ ok: false, error: { code: 'session-edit/forbidden', message: 'Forbidden' } }),
+  });
+  await f.controller.retryMessage({ ...target, messageId: 'message-8' });
+  assert.equal(f.controller.getSnapshot().panel, null);
+  assert.equal(f.controller.getSnapshot().notice.code, 'session-edit/forbidden');
+  f.controller.clearNotice();
+  assert.equal(f.controller.getSnapshot().notice, null);
+  f.controller.dispose();
+});
+
+test('a late retry result never closes a dialog opened afterwards', async () => {
+  const gate = Promise.withResolvers();
+  const f = fixture({ execute: () => gate.promise });
+  const retry = f.controller.retryMessage({ ...target, messageId: 'message-8' });
+  await Promise.resolve();
+  await f.controller.openEdit({ ...target, messageId: 'message-8' });
+  gate.resolve(ok({ sourceSessionId: 'source', childSessionId: 'late-child' }));
+  await retry;
+  const state = f.controller.getSnapshot();
+  assert.equal(state.panel.view, 'editor');
+  assert.deepEqual(f.navigated, []);
+  assert.equal(state.notice.sessionId, 'late-child');
+  f.controller.dispose();
+});
+
+test('continuation reuses cached session facts without a second inspect', async () => {
+  const f = fixture();
+  await f.controller.loadSession('source');
+  await f.controller.continueSession('source');
+  assert.deepEqual(
+    f.calls.map(call => call.name),
+    ['inspect', 'execute'],
+  );
+  f.controller.dispose();
+});
+
+test('editing from history preserves the paged list and returns to it', async () => {
+  const f = fixture();
+  await f.controller.openHistory('source');
+  const panel = () => f.controller.getSnapshot().panel;
+  await f.controller.openEdit({
+    ...f.facts.messages[0],
+    sessionId: 'source',
+    title: 'Source conversation',
+  });
+  assert.equal(panel().view, 'editor');
+  assert.ok(panel().historyState);
+  f.controller.backToHistory();
+  assert.equal(panel().view, 'history');
+  assert.deepEqual(
+    panel().messages.map(item => item.eventSeq),
+    [30, 40],
+  );
+  assert.equal(panel().nextBeforeSeq, 30);
+  f.controller.dispose();
+});
+
+test('continuation attempts an available model directly and prompt mode is explicit', async () => {
+  const f = fixture();
+  await f.controller.continueSession('source');
+  assert.deepEqual(f.calls.find(call => call.name === 'execute').request, {
+    sessionId: 'source',
+    action: 'continue',
+    continuationMode: 'no-message',
+  });
+  f.controller.dispose();
+
+  const denied = fixture();
+  denied.facts.continuation = { available: false, canSendPrompt: true, reason: 'model-disabled' };
+  await denied.controller.continueSession('source');
+  assert.equal(denied.calls.filter(call => call.name === 'execute').length, 0);
+  assert.equal(denied.controller.getSnapshot().notice.code, 'session-edit/model-disabled');
+  await denied.controller.continueSession('source', 'prompt');
+  const promptRequest = denied.calls.find(call => call.name === 'execute').request;
+  assert.equal(promptRequest.continuationMode, 'prompt');
+  assert.equal(promptRequest.promptLocale, 'en');
+  denied.controller.dispose();
+});
