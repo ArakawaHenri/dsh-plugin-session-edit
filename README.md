@@ -17,7 +17,6 @@ sessions back up where they left off. Built against DSH `0.2.1-rc.2`.
 
 Message actions use DSH's native icons and tooltips. Editing opens the native
 inline editor at the selected message, with **Cancel** and **Regenerate**.
-The session menu also has a paginated history browser with inline editing.
 
 After a resumable stop, the empty composer's primary button becomes **Continue**.
 Typing text or adding attachments restores the native send action; running
@@ -37,17 +36,6 @@ https://github.com/ArakawaHenri/dsh-plugin-session-edit
 ```
 
 Refresh the page afterwards.
-
-## Configuration
-
-```yaml
-- id: session-edit
-  name: 'dsh-session-edit'
-  config:
-    maxTextChars: 131072
-```
-
-`maxTextChars` (optional) caps the length of an edited message.
 
 ## Development
 

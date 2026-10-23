@@ -17,23 +17,18 @@ function fixture(overrides = {}) {
   const navigated = [];
   const facts = {
     sessionId: 'source',
-    title: 'Source conversation',
     status: 'idle',
     archived: false,
     ordinary: true,
     headSeq: 100,
-    messages: [message(30), message(40)],
-    nextBeforeSeq: 30,
-    continuation: { available: true, tailRole: 'assistant' },
+    continuation: { available: true },
   };
   const handlers = {
     inspect: request =>
       ok({
         ...facts,
         sessionId: request.sessionId,
-        ...(request.eventSeq === undefined
-          ? {}
-          : { messages: [message(request.eventSeq)], nextBeforeSeq: null }),
+        ...(request.eventSeq === undefined ? {} : { message: message(request.eventSeq) }),
       }),
     execute: request => ok({ sourceSessionId: request.sessionId, ...(request.action === 'continue' ? {} : { historyUpdated: true }) }),
     ...overrides,
@@ -54,36 +49,11 @@ function fixture(overrides = {}) {
   return { controller, calls, navigated, facts };
 }
 
-test('history prepends older pages using an exclusive raw event cursor', async () => {
-  const f = fixture({
-    inspect: request =>
-      ok({
-        ...f.facts,
-        messages:
-          request.beforeSeq === undefined ? [message(30), message(40)] : [message(5), message(30)],
-        nextBeforeSeq: request.beforeSeq === undefined ? 30 : null,
-      }),
-  });
-  await f.controller.openHistory('source');
-  await f.controller.loadOlder();
-  assert.deepEqual(
-    f.controller.getSnapshot().panel.messages.map(item => item.eventSeq),
-    [5, 30, 40],
-  );
-  assert.deepEqual(
-    f.calls.map(call => call.name),
-    ['inspect', 'inspect'],
-  );
-  assert.equal(f.calls[1].request.beforeSeq, 30);
-  f.controller.dispose();
-});
-
 test('editing resolves the exact message ID and submits from the message', async () => {
   const f = fixture();
   await f.controller.openEdit(target);
   assert.deepEqual(f.calls[0].request, { sessionId: 'source', eventSeq: 8 });
   assert.equal(f.controller.getSnapshot().panel.text, 'message 8');
-  assert.equal(f.controller.getSnapshot().panel.placement, 'message');
   f.controller.setText('changed $text\nsecond line');
   await f.controller.submitEdit();
   assert.deepEqual(
@@ -129,7 +99,7 @@ test('double retry clicks share identity resolution and only submit once', async
   const second = f.controller.retryMessage(target);
   await Promise.resolve();
   assert.equal(f.calls.length, 1);
-  gate.resolve(ok({ ...f.facts, messages: [message(8)] }));
+  gate.resolve(ok({ ...f.facts, message: message(8) }));
   await Promise.all([first, second]);
   assert.equal(f.calls.filter(call => call.name === 'execute').length, 1);
   assert.deepEqual(f.navigated, ['source']);
@@ -157,17 +127,16 @@ test('late identity lookup does not reopen an editor or overwrite another conver
   const gate = Promise.withResolvers();
   const f = fixture({
     inspect: request =>
-      request.eventSeq !== undefined
+      request.sessionId === 'source'
         ? gate.promise
-        : ok({ ...f.facts, sessionId: 'new', title: 'New' }),
+        : ok({ ...f.facts, sessionId: 'new', message: message(8) }),
   });
   const first = f.controller.openEdit(target);
   f.controller.close();
-  await f.controller.openHistory('new');
-  gate.resolve(ok({ ...f.facts, messages: [message(8)] }));
+  await f.controller.openEdit({ ...target, sessionId: 'new' });
+  gate.resolve(ok({ ...f.facts, message: message(8) }));
   await first;
   assert.equal(f.controller.getSnapshot().panel.sessionId, 'new');
-  assert.equal(f.controller.getSnapshot().panel.title, 'New');
   assert.equal(f.calls.filter(call => call.name === 'execute').length, 0);
   f.controller.dispose();
 });
@@ -179,14 +148,13 @@ test('a rejected edit keeps its inline draft', async () => {
   await f.controller.openEdit({ ...target, messageId: 'message-8' });
   f.controller.setText('draft to retain');
   await f.controller.submitEdit();
-  assert.equal(f.controller.getSnapshot().panel.view, 'editor');
   assert.equal(f.controller.getSnapshot().panel.text, 'draft to retain');
   assert.equal(f.controller.getSnapshot().panel.busy, false);
   assert.equal(f.controller.getSnapshot().panel.error.code, 'session-edit/session-changed');
   f.controller.dispose();
 });
 
-test('a rejected one-click retry surfaces a notice when no dialog is open', async () => {
+test('a rejected one-click retry surfaces a notice', async () => {
   const f = fixture({
     execute: () => ({ ok: false, error: { code: 'session-edit/forbidden', message: 'Forbidden' } }),
   });
@@ -198,7 +166,7 @@ test('a rejected one-click retry surfaces a notice when no dialog is open', asyn
   f.controller.dispose();
 });
 
-test('a late retry result never closes a dialog opened afterwards', async () => {
+test('a late retry result never closes an editor opened afterwards', async () => {
   const gate = Promise.withResolvers();
   const f = fixture({ execute: () => gate.promise });
   const retry = f.controller.retryMessage({ ...target, messageId: 'message-8' });
@@ -207,7 +175,7 @@ test('a late retry result never closes a dialog opened afterwards', async () => 
   gate.resolve(ok({ sourceSessionId: 'source', historyUpdated: true }));
   await retry;
   const state = f.controller.getSnapshot();
-  assert.equal(state.panel.view, 'editor');
+  assert.equal(state.panel.eventSeq, 8);
   assert.deepEqual(f.navigated, []);
   assert.equal(state.notice.sessionId, 'source');
   f.controller.dispose();
@@ -225,28 +193,7 @@ test('continuation uses cached facts then refreshes without navigating', async (
   f.controller.dispose();
 });
 
-test('editing from history preserves the paged list and returns to it', async () => {
-  const f = fixture();
-  await f.controller.openHistory('source');
-  const panel = () => f.controller.getSnapshot().panel;
-  await f.controller.openEdit({
-    ...f.facts.messages[0],
-    sessionId: 'source',
-    title: 'Source conversation',
-  });
-  assert.equal(panel().view, 'editor');
-  assert.ok(panel().historyState);
-  f.controller.backToHistory();
-  assert.equal(panel().view, 'history');
-  assert.deepEqual(
-    panel().messages.map(item => item.eventSeq),
-    [30, 40],
-  );
-  assert.equal(panel().nextBeforeSeq, 30);
-  f.controller.dispose();
-});
-
-test('continuation attempts an available session directly and surfaces unavailable reason', async () => {
+test('continuation attempts an available session directly and surfaces unavailable error', async () => {
   const f = fixture();
   await f.controller.continueSession('source');
   assert.deepEqual(f.calls.find(call => call.name === 'execute').request, {
@@ -256,14 +203,14 @@ test('continuation attempts an available session directly and surfaces unavailab
   f.controller.dispose();
 
   const denied = fixture();
-  denied.facts.continuation = { available: false, reason: 'unresolved-tools' };
+  denied.facts.continuation = { available: false };
   await denied.controller.continueSession('source');
   assert.equal(denied.calls.filter(call => call.name === 'execute').length, 0);
-  assert.equal(denied.controller.getSnapshot().notice.code, 'session-edit/unresolved-tools');
+  assert.equal(denied.controller.getSnapshot().notice.code, 'session-edit/continuation-unsupported');
   denied.controller.dispose();
 });
 
-test('continuation leaves an inline edit intact on success and reports failures at the composer', async () => {
+test('continuation leaves an inline edit intact on success and reports failures via notice', async () => {
   let reject = false;
   const f = fixture({ execute: () => reject
     ? { ok: false, error: { code: 'session-edit/host-error', message: 'Failed' } }
@@ -278,24 +225,7 @@ test('continuation leaves an inline edit intact on success and reports failures 
   reject = true;
   await f.controller.continueSession('source');
   assert.equal(f.controller.getSnapshot().panel, editor);
-  assert.equal(f.controller.getSnapshot().notice.action, 'continue');
-  assert.equal(f.controller.getSnapshot().notice.sessionId, 'source');
-  f.controller.dispose();
-});
-
-test('switching inline history edits preserves the page and each message draft', async () => {
-  const f = fixture();
-  await f.controller.openHistory('source');
-  const first = { ...f.facts.messages[0], sessionId: 'source' };
-  const second = { ...f.facts.messages[1], sessionId: 'source' };
-  await f.controller.openEdit(first);
-  f.controller.setText('Saved locally');
-  await f.controller.openEdit(second);
-  assert.equal(f.controller.getSnapshot().panel.placement, 'history');
-  f.controller.backToHistory();
-  assert.deepEqual(f.controller.getSnapshot().panel.messages, f.facts.messages);
-  await f.controller.openEdit(first);
-  assert.equal(f.controller.getSnapshot().panel.text, 'Saved locally');
+  assert.equal(f.controller.getSnapshot().notice.code, 'session-edit/host-error');
   f.controller.dispose();
 });
 

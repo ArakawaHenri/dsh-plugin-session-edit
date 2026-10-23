@@ -28,19 +28,9 @@ export function remoteContribution() {
 
   const parse = (method, input) => {
     if (method === 'inspect') {
-      const value = expectObject(input, ['sessionId', 'eventSeq', 'beforeSeq', 'limit']);
+      const value = expectObject(input, ['sessionId', 'eventSeq']);
       const output = { sessionId: expectString(value.sessionId, 'sessionId') };
       if (value.eventSeq !== undefined) output.eventSeq = expectSeq(value.eventSeq, 'eventSeq');
-      if (value.beforeSeq !== undefined) output.beforeSeq = expectSeq(value.beforeSeq, 'beforeSeq');
-      if (value.eventSeq !== undefined && value.beforeSeq !== undefined) {
-        throw new TypeError('Cannot specify both eventSeq and beforeSeq.');
-      }
-      if (value.limit !== undefined) {
-        if (!Number.isSafeInteger(value.limit) || value.limit < 1 || value.limit > 100) {
-          throw new TypeError('limit must be between 1 and 100.');
-        }
-        output.limit = value.limit;
-      }
       return output;
     }
 
@@ -81,8 +71,6 @@ export function remoteContribution() {
       properties: {
         sessionId: idSchema,
         eventSeq: seqSchema,
-        beforeSeq: seqSchema,
-        limit: { type: 'integer', minimum: 1, maximum: 100 },
       },
       required: ['sessionId'],
     },

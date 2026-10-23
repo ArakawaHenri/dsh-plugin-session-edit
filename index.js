@@ -16,9 +16,7 @@ export const inject = [
   'workspaceRegistry',
 ];
 
-export const Config = z.object({
-  maxTextChars: z.natural().min(1).max(131072).default(131072),
-});
+export const Config = z.object({});
 
 export class SessionEditService extends TypertRemoteService {
   constructor(ctx, engine) {
@@ -58,9 +56,9 @@ export class SessionEditService extends TypertRemoteService {
   }
 }
 
-export async function apply(ctx, config = Config({})) {
+export async function apply(ctx) {
   assertRuntime();
-  const engine = new SessionEditEngine(ctx, config);
+  const engine = new SessionEditEngine(ctx);
   try {
     ctx.effect(() => () => engine.close(), 'sessionEdit.lifecycle');
     new SessionEditService(ctx, engine);

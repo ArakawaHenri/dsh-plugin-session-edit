@@ -43,7 +43,7 @@ function clock(time) {
 function mountUI(ctx, React, { createPortal }, ui) {
   const h = React.createElement;
   const {
-    Button, InlineEditor, MenuItemButton, Modal, Toast, Tooltip, writeClipboard,
+    Button, InlineEditor, Toast, Tooltip, writeClipboard,
     IconEditOutlineRegular: EditIcon, IconRefreshOutlineRegular: RetryIcon,
     IconCopyOutlineRegular: CopyIcon, IconCheckOutlineRegular: CheckIcon,
     IconTriangleRightFillRegular: PlayIcon,
@@ -106,45 +106,25 @@ function mountUI(ctx, React, { createPortal }, ui) {
     );
   }
 
-  function HistoryMenu(props) {
-    const t = useTranslation();
-    const allowed = canExecute(props);
-    const [, setOpen] = props.useMenuOpenState();
-    if (!allowed) return null;
-    return h(MenuItemButton, {
-      icon: h(EditIcon),
-      onSelect: () => {
-        setOpen(false);
-        void controller.openHistory(props.sessionId, props.displayTitle || t('untitled'));
-      },
-    }, t('menu'));
-  }
-
   function MessageEditor({ current }) {
     const t = useTranslation();
     const ref = React.useRef(null);
     React.useEffect(() => {
       if (!current.loading) ref.current?.querySelector('textarea')?.focus();
     }, [current.eventSeq, current.loading]);
-    const cancel = () => current.placement === 'history' && !current.busy
-      ? controller.backToHistory() : controller.close();
     return h('div', {
       className: 'dsh-se-editor', ref, 'data-testid': 'session-edit-inline',
-      onKeyDown: event => {
-        // Escape belongs to the inline editor before the enclosing history modal.
-        if (event.key === 'Escape') event.stopPropagation();
-      },
     },
       current.error && h('p', { className: 'dsh-se-error', role: 'alert' }, explain(current.error, t)),
       current.loading && h('p', { className: 'dsh-se-muted', role: 'status' }, t('loading')),
       h('fieldset', { className: 'dsh-se-editor-field', disabled: current.busy || current.loading },
         h(InlineEditor, {
           value: current.text, label: t('textLabel'), className: 'dsh-se-editor-input',
-          onChange: controller.setText, onSave: () => void controller.submitEdit(), onCancel: cancel,
+          onChange: controller.setText, onSave: () => void controller.submitEdit(), onCancel: controller.close,
         }),
       ),
       h('div', { className: 'dsh-se-editor-actions' },
-        h(Button, { size: 'sm', onClick: cancel }, t(current.busy ? 'close' : 'cancel')),
+        h(Button, { size: 'sm', onClick: controller.close }, t(current.busy ? 'close' : 'cancel')),
         h(Button, {
           size: 'sm', variant: 'primary', icon: h(RetryIcon),
           disabled: current.busy || current.loading || !current.messageId || !current.text?.trim(),
@@ -160,11 +140,10 @@ function mountUI(ctx, React, { createPortal }, ui) {
     const data = props.node.data;
     const state = useState();
     const current = state.panel;
-    const editing = current?.view === 'editor' && current.placement === 'message' &&
-      current.sessionId === props.sessionId && current.eventSeq === data.seq;
+    const editing = current?.sessionId === props.sessionId && current.eventSeq === data.seq;
     React.useEffect(() => () => {
       const panel = controller.getSnapshot().panel;
-      if (panel?.placement === 'message' && panel.sessionId === props.sessionId && panel.eventSeq === data.seq) {
+      if (panel?.sessionId === props.sessionId && panel.eventSeq === data.seq) {
         controller.close();
       }
     }, [props.sessionId, data.seq]);
@@ -182,7 +161,7 @@ function mountUI(ctx, React, { createPortal }, ui) {
     const session = state.sessions[props.sessionId]?.value;
     const owned = session?.ordinary === false;
     const archived = session?.archived === true;
-    const tooLong = supported && prepared.text.length > (session?.maxTextChars ?? 131072);
+    const tooLong = supported && prepared.text.length > 131072;
     const editable = data.source?.kind === 'user' && Number.isSafeInteger(data.seq) &&
       data.seq >= 0 && supported && !owned && !archived && !tooLong;
     const reason = owned ? t('error.owned-session') : archived ? t('error.archived') : tooLong ? t('error.message-too-large') : t('plainTextOnly');
@@ -257,67 +236,10 @@ function mountUI(ctx, React, { createPortal }, ui) {
     );
   }
 
-  function ComposerNotice(props) {
-    const t = useTranslation();
-    const state = useState();
-    const entry = state.sessions[props.sessionId];
-    const notice = state.notice?.action === 'continue' && state.notice.sessionId === props.sessionId ? state.notice : null;
-    const error = notice || entry?.error;
-    if (!error) return null;
-    return h('div', { className: 'dsh-se-composer-notice', role: 'alert' },
-      h(WarningIcon), h('span', null, explain(error, t)),
-      notice
-        ? h(Button, { size: 'sm', onClick: controller.clearNotice }, t('close'))
-        : h(Button, { size: 'sm', disabled: entry.loading,
-          onClick: () => void controller.loadSession(props.sessionId, true).catch(() => {}),
-        }, t('refresh')),
-    );
-  }
-
-  function History({ current }) {
-    const t = useTranslation();
-    const history = current.view === 'editor' ? current.historyState : current;
-    return h(React.Fragment, null,
-      current.error && current.view === 'history' && h('p', { className: 'dsh-se-error', role: 'alert' }, explain(current.error, t)),
-      current.loading && !history.messages.length && h('p', { className: 'dsh-se-muted', role: 'status' }, t('loading')),
-      history.nextBeforeSeq !== null && h(Button, {
-        size: 'sm', disabled: current.loading || current.view === 'editor',
-        onClick: () => void controller.loadOlder(), 'data-testid': 'load-older',
-      }, t(current.loading ? 'loading' : 'loadOlder')),
-      !current.loading && !history.messages.length && h('p', { className: 'dsh-se-muted' }, t('emptyHistory')),
-      h('ol', { className: 'dsh-se-message-list' }, ...history.messages.map(message =>
-        h('li', { key: message.messageId || message.eventSeq, className: 'dsh-se-message', 'data-event-seq': message.eventSeq },
-          current.view === 'editor' && current.eventSeq === message.eventSeq
-            ? h(MessageEditor, { current })
-            : h(React.Fragment, null,
-              h('p', { className: 'dsh-se-message-text' },
-                [
-                  ...(message.attachments || []).map(item => `[${item.name || item.type}]`),
-                  ...(message.text ? [message.text] : []),
-                ].join(' '),
-              ),
-              !message.editable && h('p', { className: 'dsh-se-muted' }, explain(message.reason || 'message-not-editable', t)),
-              h('div', { className: 'dsh-se-row-actions' },
-                h('time', { dateTime: new Date(message.time).toISOString() }, clock(message.time)),
-                action(t('editTitle'), EditIcon, () => void controller.openEdit({ ...message, sessionId: current.sessionId, title: current.title }), {
-                  unavailable: !message.editable, busy: controller.isBusy(current.sessionId, 'edit', message.eventSeq),
-                }),
-                action(t('retryTitle'), RetryIcon, () => void controller.retryMessage({ ...message, sessionId: current.sessionId }), {
-                  unavailable: !message.editable, busy: controller.isBusy(current.sessionId, 'retry', message.eventSeq),
-                }),
-              ),
-            ),
-        ),
-      )),
-    );
-  }
-
   function Overlay() {
     const t = useTranslation();
     const state = useState();
-    const current = state.panel;
-    const historyOpen = current && (current.view === 'history' || current.placement === 'history');
-    const notice = state.notice?.action !== 'continue' ? state.notice : null;
+    const notice = state.notice;
     return h(React.Fragment, null,
       h('style', { 'data-session-edit-styles': true }, styles),
       notice && h(Toast, {
@@ -327,20 +249,13 @@ function mountUI(ctx, React, { createPortal }, ui) {
           controller.clearNotice(); void controller.openResult({ sourceSessionId: notice.sessionId, historyUpdated: notice.historyUpdated });
         } }] : undefined,
       }),
-      h(Modal, {
-        open: Boolean(historyOpen), onClose: controller.close, title: t('historyTitle'), closeLabel: t('close'),
-        description: current?.title || t('untitled'), className: 'dsh-se-history-modal',
-        footer: h(Button, { size: 'sm', onClick: controller.close }, t('close')),
-      }, historyOpen && h('div', { 'data-testid': 'session-edit-dialog' }, h(History, { current }))),
     );
   }
 
   const register = (name, options, component) => ctx.slots.inject(name, () => ctx.slots.register({ name, ...options }, component));
-  register('sidebar.workspaces.session.menu.item', { id: 'dsh-session-edit.history', order: 450, label: () => translate('menu') }, HistoryMenu);
   register('shell.overlay', { id: 'dsh-session-edit.dialog', order: 120 }, Overlay);
   for (const key of ['user', 'steering']) register('conversation.chat.node', { key, priority: -100 }, UserMessage);
   register('conversation.input.right', { id: 'dsh-session-edit.primary', order: 100 }, ComposerContinue);
-  register('conversation.input.dock', { id: 'dsh-session-edit.notice', order: 10 }, ComposerNotice);
 }
 
 window.__ModuleLoader__.load({

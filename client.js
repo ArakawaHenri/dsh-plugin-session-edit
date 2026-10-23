@@ -26,19 +26,9 @@
     };
     const parse = (method, input) => {
       if (method === "inspect") {
-        const value2 = expectObject(input, ["sessionId", "eventSeq", "beforeSeq", "limit"]);
+        const value2 = expectObject(input, ["sessionId", "eventSeq"]);
         const output2 = { sessionId: expectString(value2.sessionId, "sessionId") };
         if (value2.eventSeq !== void 0) output2.eventSeq = expectSeq(value2.eventSeq, "eventSeq");
-        if (value2.beforeSeq !== void 0) output2.beforeSeq = expectSeq(value2.beforeSeq, "beforeSeq");
-        if (value2.eventSeq !== void 0 && value2.beforeSeq !== void 0) {
-          throw new TypeError("Cannot specify both eventSeq and beforeSeq.");
-        }
-        if (value2.limit !== void 0) {
-          if (!Number.isSafeInteger(value2.limit) || value2.limit < 1 || value2.limit > 100) {
-            throw new TypeError("limit must be between 1 and 100.");
-          }
-          output2.limit = value2.limit;
-        }
         return output2;
       }
       const value = expectObject(input, [
@@ -76,9 +66,7 @@
       inspect: {
         properties: {
           sessionId: idSchema,
-          eventSeq: seqSchema,
-          beforeSeq: seqSchema,
-          limit: { type: "integer", minimum: 1, maximum: 100 }
+          eventSeq: seqSchema
         },
         required: ["sessionId"]
       },
@@ -187,13 +175,9 @@
       publish({
         panel: {
           sessionId,
-          title: "",
-          view: "history",
           busy: false,
           loading: false,
           error: null,
-          messages: [],
-          nextBeforeSeq: null,
           ...properties
         }
       });
@@ -257,17 +241,17 @@
       if (!force && reads.has(sessionId)) return reads.get(sessionId);
       const loadId = ++sequence;
       const current = snapshot.sessions[sessionId];
-      setSessionEntry(sessionId, { ...current, loading: true, loadId, error: null });
+      setSessionEntry(sessionId, { ...current, loading: true, loadId });
       const task = (async () => {
         try {
-          const value = await call("inspect", { sessionId, limit: 30 });
+          const value = await call("inspect", { sessionId });
           if (!disposed && snapshot.sessions[sessionId]?.loadId === loadId) {
-            setSessionEntry(sessionId, { value, loading: false, error: null, loadId });
+            setSessionEntry(sessionId, { value, loading: false, loadId });
           }
           return value;
         } catch (error) {
           if (!disposed && snapshot.sessions[sessionId]?.loadId === loadId) {
-            setSessionEntry(sessionId, { ...current, loading: false, loadId, error: errorOf(error) });
+            setSessionEntry(sessionId, { ...current, loading: false, loadId });
           }
           throw error;
         } finally {
@@ -277,58 +261,13 @@
       reads.set(sessionId, task);
       return task;
     }
-    async function openHistory(sessionId, title = "") {
-      const epoch = newPanel(sessionId, { title, loading: true });
-      try {
-        const value = await loadSession(sessionId, true);
-        if (value) {
-          updatePanel(
-            {
-              loading: false,
-              title: value.title || title,
-              messages: value.messages,
-              nextBeforeSeq: value.nextBeforeSeq
-            },
-            epoch
-          );
-        }
-      } catch (error) {
-        updatePanel({ loading: false, error: errorOf(error) }, epoch);
-      }
-    }
-    async function loadOlder() {
-      const current = snapshot.panel;
-      if (!current || current.loading || current.nextBeforeSeq === null) return;
-      const epoch = panelEpoch;
-      updatePanel({ loading: true, error: null });
-      try {
-        const value = await call("inspect", {
-          sessionId: current.sessionId,
-          beforeSeq: current.nextBeforeSeq,
-          limit: 30
-        });
-        const map = new Map(
-          [...value.messages, ...current.messages].map((message) => [message.eventSeq, message])
-        );
-        updatePanel(
-          {
-            loading: false,
-            messages: [...map.values()].sort((a, b) => a.eventSeq - b.eventSeq),
-            nextBeforeSeq: value.nextBeforeSeq
-          },
-          epoch
-        );
-      } catch (error) {
-        updatePanel({ loading: false, error: errorOf(error) }, epoch);
-      }
-    }
     async function resolveTarget(target) {
       if (target.messageId && target.editable !== false) return target;
       const value = await call("inspect", {
         sessionId: target.sessionId,
         eventSeq: target.eventSeq
       });
-      const message = value.messages.find((item) => item.eventSeq === target.eventSeq);
+      const message = value.message;
       if (message && (target.text !== void 0 && target.text !== message.text || target.time !== void 0 && target.time !== message.time)) {
         throw { code: "session-edit/session-changed", message: "The displayed message changed. Reload the conversation." };
       }
@@ -338,25 +277,14 @@
           message: message?.reason || "Select an editable user message"
         };
       }
-      return { ...target, ...message, title: value.title || target.title };
+      return { ...target, ...message };
     }
     async function openEdit(target) {
       const key = draftKey(target.sessionId, target.eventSeq, target.messageId);
-      const prior = snapshot.panel;
-      const history = prior?.view === "editor" ? prior.historyState : prior;
-      const historyState = history && prior.sessionId === target.sessionId && (prior.view === "history" || prior.placement === "history") ? {
-        title: history.title,
-        messages: history.messages,
-        nextBeforeSeq: history.nextBeforeSeq
-      } : null;
       const epoch = newPanel(target.sessionId, {
-        title: target.title || prior?.title || "",
-        view: "editor",
-        placement: historyState ? "history" : "message",
         eventSeq: target.eventSeq,
         text: drafts.get(key) ?? target.text ?? "",
-        loading: true,
-        historyState
+        loading: true
       });
       try {
         const message = await resolveTarget(target);
@@ -364,8 +292,7 @@
           {
             messageId: message.messageId,
             text: drafts.get(draftKey(target.sessionId, target.eventSeq, message.messageId)) ?? message.text,
-            loading: false,
-            title: message.title || target.title || ""
+            loading: false
           },
           epoch
         );
@@ -373,26 +300,15 @@
         updatePanel({ loading: false, error: errorOf(error) }, epoch);
       }
     }
-    function backToHistory() {
-      const current = snapshot.panel;
-      if (!current || current.busy || current.view !== "editor" || !current.historyState) return;
-      newPanel(current.sessionId, {
-        title: current.historyState.title || current.title,
-        view: "history",
-        messages: current.historyState.messages,
-        nextBeforeSeq: current.historyState.nextBeforeSeq,
-        loading: false
-      });
-    }
     function setText(text) {
       const current = snapshot.panel;
-      if (!current || current.busy || current.loading || current.view !== "editor") return;
+      if (!current || current.busy || current.loading) return;
       drafts.set(draftKey(current.sessionId, current.eventSeq, current.messageId), text);
       updatePanel({ text, error: null });
     }
     function submitEdit() {
       const current = snapshot.panel;
-      if (!current || current.view !== "editor" || current.busy || current.loading || !current.messageId || !current.text?.trim()) {
+      if (!current || current.busy || current.loading || !current.messageId || !current.text?.trim()) {
         return;
       }
       const key = actionKey(current.sessionId, "edit", current.eventSeq);
@@ -429,19 +345,9 @@
       publish({ notice: { ...errorOf(error), sessionId, historyUpdated: true } });
       return true;
     }
-    function reportActionError(sessionId, epoch, error) {
-      const normalized = errorOf(error);
-      if (!disposed && epoch === panelEpoch && snapshot.panel?.sessionId === sessionId) {
-        updatePanel({ busy: false, loading: false, error: normalized }, epoch);
-      } else if (!disposed) {
-        publish({ notice: normalized });
-      }
-    }
     function retryMessage(target) {
       return oneShot(actionKey(target.sessionId, "retry", target.eventSeq), async () => {
         const epoch = panelEpoch;
-        const inPanel = snapshot.panel?.sessionId === target.sessionId;
-        if (inPanel) updatePanel({ busy: true, error: null }, epoch);
         try {
           const message = await resolveTarget(target);
           const result = await call("execute", {
@@ -453,8 +359,8 @@
           if (disposed) return;
           await openResult(result, epoch);
         } catch (error) {
-          if (!await reportSavedFailure(target.sessionId, epoch, error)) {
-            reportActionError(target.sessionId, epoch, error);
+          if (!await reportSavedFailure(target.sessionId, epoch, error) && !disposed) {
+            publish({ notice: errorOf(error) });
           }
         }
       });
@@ -468,8 +374,8 @@
           if (!facts) return;
           if (!facts.continuation.available) {
             throw {
-              code: `session-edit/${facts.continuation.reason || "not-resumable"}`,
-              message: facts.continuation.reason || "Continuation unavailable"
+              code: "session-edit/continuation-unsupported",
+              message: "Continuation unavailable"
             };
           }
           await call("execute", {
@@ -480,7 +386,7 @@
           await loadSession(sessionId, true).catch(() => {
           });
         } catch (error) {
-          publish({ notice: { ...errorOf(error), sessionId, action: "continue" } });
+          publish({ notice: errorOf(error) });
         }
       });
     }
@@ -491,10 +397,7 @@
         return () => listeners.delete(listener);
       },
       loadSession,
-      openHistory,
-      loadOlder,
       openEdit,
-      backToHistory,
       retryMessage,
       continueSession,
       setText,
@@ -598,11 +501,8 @@
 
   // locale/en.json
   var en_default = {
-    menu: "Message history\u2026",
-    historyTitle: "Message history",
     editTitle: "Edit",
     retryTitle: "Retry",
-    untitled: "Untitled",
     close: "Close",
     cancel: "Cancel",
     confirmEdit: "Regenerate",
@@ -611,19 +511,17 @@
     copied: "Copied",
     copyFailed: "Copy failed",
     loading: "Loading\u2026",
-    loadOlder: "Load earlier",
-    emptyHistory: "No messages",
     textLabel: "Message",
     openConversation: "Open",
     navigationFailed: "Could not open session",
     plainTextOnly: "Unsupported content",
+    sending: "Sending\u2026",
     "error.forbidden": "Permission denied",
     "error.unsupported-runtime": "Unsupported DSH version",
     "error.message-not-editable": "Cannot edit this message",
     "error.session-changed": "Session changed, try again",
     "error.source-running": "Session is running",
     "error.queue-pending": "Clear pending queue first",
-    "error.not-resumable": "Nothing to continue",
     "error.continuation-unsupported": "Direct continue unavailable",
     "error.migration-required": "Session migration required",
     "error.writer-held": "Session is locked",
@@ -632,21 +530,13 @@
     "error.archived": "Session is archived",
     "error.generic": "Operation failed",
     "error.not-found": "Session not found",
-    "error.no-context": "No context to continue",
-    "error.input-not-admitted": "Message not recorded, retry instead",
-    "error.unresolved-tools": "Unfinished tool calls",
-    "error.unsupported-tail": "Direct continue unavailable",
-    "error.partial-replay-unavailable": "Model cannot resume partial output",
     "error.owned-session": "Subagent session",
-    "error.attachments-not-supported": "Unsupported attachment",
     "error.message-too-large": "Message too long",
     "error.workspace-required": "Missing working directory",
     "error.unsupported-format": "Unsupported session format",
     "error.invalid-history": "Invalid session history",
     "error.host-error": "Host error",
     "error.closing": "Plugin is unloading",
-    sending: "Sending\u2026",
-    refresh: "Refresh",
     "error.unsupported-backend": "JSONL storage required",
     "error.regeneration-failed": "Saved, but regeneration failed",
     "error.refresh-failed": "Updated, please reopen session"
@@ -654,11 +544,8 @@
 
   // locale/zh.json
   var zh_default = {
-    menu: "\u5386\u53F2\u6D88\u606F\u2026",
-    historyTitle: "\u5386\u53F2\u6D88\u606F",
     editTitle: "\u7F16\u8F91",
     retryTitle: "\u91CD\u8BD5",
-    untitled: "\u672A\u547D\u540D",
     close: "\u5173\u95ED",
     cancel: "\u53D6\u6D88",
     confirmEdit: "\u91CD\u65B0\u751F\u6210",
@@ -667,19 +554,17 @@
     copied: "\u5DF2\u590D\u5236",
     copyFailed: "\u590D\u5236\u5931\u8D25",
     loading: "\u52A0\u8F7D\u4E2D\u2026",
-    loadOlder: "\u52A0\u8F7D\u66F4\u65E9",
-    emptyHistory: "\u6682\u65E0\u6D88\u606F",
     textLabel: "\u6D88\u606F\u5185\u5BB9",
     openConversation: "\u6253\u5F00",
     navigationFailed: "\u672A\u80FD\u6253\u5F00\u4F1A\u8BDD",
     plainTextOnly: "\u4E0D\u652F\u6301\u6B64\u5185\u5BB9\u7C7B\u578B",
+    sending: "\u53D1\u9001\u4E2D\u2026",
     "error.forbidden": "\u65E0\u6743\u9650",
     "error.unsupported-runtime": "\u5F53\u524D DSH \u7248\u672C\u4E0D\u53D7\u652F\u6301",
     "error.message-not-editable": "\u4E0D\u53EF\u7F16\u8F91",
     "error.session-changed": "\u4F1A\u8BDD\u5DF2\u53D8\u66F4\uFF0C\u8BF7\u91CD\u8BD5",
     "error.source-running": "\u4F1A\u8BDD\u8FD0\u884C\u4E2D",
     "error.queue-pending": "\u8BF7\u5148\u5904\u7406\u5F85\u53D1\u961F\u5217",
-    "error.not-resumable": "\u5F53\u524D\u4E0D\u53EF\u7EE7\u7EED",
     "error.continuation-unsupported": "\u4E0D\u652F\u6301\u76F4\u63A5\u7EE7\u7EED",
     "error.migration-required": "\u8BF7\u5148\u8FC1\u79FB\u6B64\u4F1A\u8BDD",
     "error.writer-held": "\u4F1A\u8BDD\u88AB\u5360\u7528",
@@ -688,28 +573,20 @@
     "error.archived": "\u4F1A\u8BDD\u5DF2\u5F52\u6863",
     "error.generic": "\u64CD\u4F5C\u5931\u8D25",
     "error.not-found": "\u4F1A\u8BDD\u4E0D\u5B58\u5728",
-    "error.no-context": "\u65E0\u53EF\u7EE7\u7EED\u5185\u5BB9",
-    "error.input-not-admitted": "\u6D88\u606F\u672A\u5165\u5217\uFF0C\u8BF7\u76F4\u63A5\u91CD\u8BD5",
-    "error.unresolved-tools": "\u5DE5\u5177\u8C03\u7528\u672A\u5B8C\u6210",
-    "error.unsupported-tail": "\u4E0D\u652F\u6301\u76F4\u63A5\u7EE7\u7EED",
-    "error.partial-replay-unavailable": "\u5F53\u524D\u6A21\u578B\u4E0D\u652F\u6301\u76F4\u63A5\u7EED\u5199",
     "error.owned-session": "\u5B50\u667A\u80FD\u4F53\u4F1A\u8BDD",
-    "error.attachments-not-supported": "\u4E0D\u652F\u6301\u6B64\u9644\u4EF6",
     "error.message-too-large": "\u8D85\u51FA\u957F\u5EA6\u9650\u5236",
     "error.workspace-required": "\u7F3A\u5C11\u5DE5\u4F5C\u76EE\u5F55",
     "error.unsupported-format": "\u4E0D\u652F\u6301\u7684\u4F1A\u8BDD\u683C\u5F0F",
     "error.invalid-history": "\u5386\u53F2\u6570\u636E\u5F02\u5E38",
     "error.host-error": "\u6267\u884C\u5931\u8D25",
     "error.closing": "\u63D2\u4EF6\u6B63\u5728\u5378\u8F7D",
-    sending: "\u53D1\u9001\u4E2D\u2026",
-    refresh: "\u5237\u65B0",
     "error.unsupported-backend": "\u4EC5\u652F\u6301 JSONL \u5B58\u50A8",
     "error.regeneration-failed": "\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u672A\u80FD\u91CD\u65B0\u751F\u6210",
     "error.refresh-failed": "\u5DF2\u66F4\u65B0\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u4F1A\u8BDD"
   };
 
   // src/client.css
-  var client_default = ".dsh-se-row {\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  min-width: 0;\n}\n\n.dsh-se-row-actions,\n.dsh-se-editor-actions {\n  display: flex;\n  align-items: center;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 4px;\n}\n\n.dsh-se-row-actions {\n  color: var(--dsw-alias-label-tertiary);\n  font-size: 12px;\n}\n\n.dsh-se-row-actions time { margin-right: 6px; }\n\n.dsh-se-action {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 28px;\n  height: 28px;\n  padding: 0;\n  border: 0;\n  border-radius: var(--dsw-radius-sm);\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary);\n  cursor: pointer;\n}\n\n.dsh-se-action:hover:not(:disabled) {\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n}\n\n.dsh-se-action:disabled,\n.dsh-se-action[aria-disabled='true'] { opacity: .4; cursor: default; }\n\n.dsh-se-row > .dsh-se-row-actions { opacity: 0; }\n.dsh-se-row:hover > .dsh-se-row-actions,\n.dsh-se-row:focus-within > .dsh-se-row-actions { opacity: 1; }\n\n.dsh-se-editor { width: 100%; min-width: 0; }\n.dsh-se-editor-field { display: flex; border: 0; padding: 0; margin: 0; min-width: 0; }\n.dsh-se-editor-input {\n  width: 100%;\n  min-height: 72px;\n  max-height: 320px;\n  padding: 10px 12px;\n  font-family: var(--dsw-font-family);\n  font-size: var(--dsh-content-font-size, 14px);\n  line-height: calc(24px + var(--dsh-content-font-delta, 0px));\n}\n.dsh-se-editor-actions { gap: 8px; margin-top: 8px; }\n\n.dsh-se-error { color: var(--dsw-alias-state-error-primary); margin: 0 0 8px; font-size: 13px; }\n.dsh-se-muted { color: var(--dsw-alias-label-secondary); margin: 0; font-size: 13px; }\n\n[data-session-edit-suppressed] { display: none !important; }\n.dsh-se-primary-seat { display: inline-flex; flex: none; }\n/* Used only if a host replaces the InputBar and no native primary can be found. */\n.dsh-se-primary {\n  display: grid;\n  place-items: center;\n  width: 34px;\n  height: 34px;\n  border: 0;\n  border-radius: 999px;\n  background: var(--dsw-alias-button-info-fill);\n  color: var(--dsw-alias-label-primary-foreground);\n  cursor: pointer;\n}\n.dsh-se-primary:disabled { opacity: .4; cursor: default; }\n\n.dsh-se-composer-notice {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 8px;\n  margin: 0 auto 6px;\n  padding: 6px 10px;\n  width: 100%;\n  max-width: var(--dsh-composer-card-max-width);\n  border-radius: var(--dsw-radius-md);\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n  font-size: 13px;\n}\n.dsh-se-composer-notice > svg { flex: none; }\n.dsh-se-composer-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }\n\n.dsh-se-history-modal { width: min(640px, calc(100vw - 32px)); }\n.dsh-se-message-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }\n.dsh-se-message { min-width: 0; padding-bottom: 12px; border-bottom: .5px solid var(--dsw-alias-border-l4); }\n.dsh-se-message:last-child { border-bottom: 0; }\n.dsh-se-message-text { margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }\n\n@media (hover: none), (max-width: 720px) {\n  .dsh-se-row > .dsh-se-row-actions { opacity: 1; }\n}\n@media (pointer: coarse) {\n  .dsh-se-action { min-width: 36px; min-height: 36px; }\n}\n";
+  var client_default = ".dsh-se-row {\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  min-width: 0;\n}\n\n.dsh-se-row-actions,\n.dsh-se-editor-actions {\n  display: flex;\n  align-items: center;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 4px;\n}\n\n.dsh-se-row-actions {\n  color: var(--dsw-alias-label-tertiary);\n  font-size: 12px;\n}\n\n.dsh-se-row-actions time { margin-right: 6px; }\n\n.dsh-se-action {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 28px;\n  height: 28px;\n  padding: 0;\n  border: 0;\n  border-radius: var(--dsw-radius-sm);\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary);\n  cursor: pointer;\n}\n\n.dsh-se-action:hover:not(:disabled) {\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n}\n\n.dsh-se-action:disabled,\n.dsh-se-action[aria-disabled='true'] { opacity: .4; cursor: default; }\n\n.dsh-se-row > .dsh-se-row-actions { opacity: 0; }\n.dsh-se-row:hover > .dsh-se-row-actions,\n.dsh-se-row:focus-within > .dsh-se-row-actions { opacity: 1; }\n\n.dsh-se-editor { width: 100%; min-width: 0; }\n.dsh-se-editor-field { display: flex; border: 0; padding: 0; margin: 0; min-width: 0; }\n.dsh-se-editor-input {\n  width: 100%;\n  min-height: 72px;\n  max-height: 320px;\n  padding: 10px 12px;\n  font-family: var(--dsw-font-family);\n  font-size: var(--dsh-content-font-size, 14px);\n  line-height: calc(24px + var(--dsh-content-font-delta, 0px));\n}\n.dsh-se-editor-actions { gap: 8px; margin-top: 8px; }\n\n.dsh-se-error { color: var(--dsw-alias-state-error-primary); margin: 0 0 8px; font-size: 13px; }\n.dsh-se-muted { color: var(--dsw-alias-label-secondary); margin: 0; font-size: 13px; }\n\n[data-session-edit-suppressed] { display: none !important; }\n.dsh-se-primary-seat { display: inline-flex; flex: none; }\n/* Used only if a host replaces the InputBar and no native primary can be found. */\n.dsh-se-primary {\n  display: grid;\n  place-items: center;\n  width: 34px;\n  height: 34px;\n  border: 0;\n  border-radius: 999px;\n  background: var(--dsw-alias-button-info-fill);\n  color: var(--dsw-alias-label-primary-foreground);\n  cursor: pointer;\n}\n.dsh-se-primary:disabled { opacity: .4; cursor: default; }\n\n@media (hover: none), (max-width: 720px) {\n  .dsh-se-row > .dsh-se-row-actions { opacity: 1; }\n}\n@media (pointer: coarse) {\n  .dsh-se-action { min-width: 36px; min-height: 36px; }\n}\n";
 
   // src/client.entry.js
   var dictionaries = { en: en_default, zh: zh_default };
@@ -746,8 +623,6 @@
     const {
       Button,
       InlineEditor,
-      MenuItemButton,
-      Modal,
       Toast,
       Tooltip,
       writeClipboard,
@@ -810,35 +685,18 @@
         }, h(Icon, { size: 16 }))
       );
     }
-    function HistoryMenu(props) {
-      const t = useTranslation();
-      const allowed = canExecute(props);
-      const [, setOpen] = props.useMenuOpenState();
-      if (!allowed) return null;
-      return h(MenuItemButton, {
-        icon: h(EditIcon),
-        onSelect: () => {
-          setOpen(false);
-          void controller.openHistory(props.sessionId, props.displayTitle || t("untitled"));
-        }
-      }, t("menu"));
-    }
     function MessageEditor({ current }) {
       const t = useTranslation();
       const ref = React.useRef(null);
       React.useEffect(() => {
         if (!current.loading) ref.current?.querySelector("textarea")?.focus();
       }, [current.eventSeq, current.loading]);
-      const cancel = () => current.placement === "history" && !current.busy ? controller.backToHistory() : controller.close();
       return h(
         "div",
         {
           className: "dsh-se-editor",
           ref,
-          "data-testid": "session-edit-inline",
-          onKeyDown: (event) => {
-            if (event.key === "Escape") event.stopPropagation();
-          }
+          "data-testid": "session-edit-inline"
         },
         current.error && h("p", { className: "dsh-se-error", role: "alert" }, explain(current.error, t)),
         current.loading && h("p", { className: "dsh-se-muted", role: "status" }, t("loading")),
@@ -851,13 +709,13 @@
             className: "dsh-se-editor-input",
             onChange: controller.setText,
             onSave: () => void controller.submitEdit(),
-            onCancel: cancel
+            onCancel: controller.close
           })
         ),
         h(
           "div",
           { className: "dsh-se-editor-actions" },
-          h(Button, { size: "sm", onClick: cancel }, t(current.busy ? "close" : "cancel")),
+          h(Button, { size: "sm", onClick: controller.close }, t(current.busy ? "close" : "cancel")),
           h(Button, {
             size: "sm",
             variant: "primary",
@@ -875,10 +733,10 @@
       const data = props.node.data;
       const state = useState();
       const current = state.panel;
-      const editing = current?.view === "editor" && current.placement === "message" && current.sessionId === props.sessionId && current.eventSeq === data.seq;
+      const editing = current?.sessionId === props.sessionId && current.eventSeq === data.seq;
       React.useEffect(() => () => {
         const panel = controller.getSnapshot().panel;
-        if (panel?.placement === "message" && panel.sessionId === props.sessionId && panel.eventSeq === data.seq) {
+        if (panel?.sessionId === props.sessionId && panel.eventSeq === data.seq) {
           controller.close();
         }
       }, [props.sessionId, data.seq]);
@@ -894,7 +752,7 @@
       const session = state.sessions[props.sessionId]?.value;
       const owned = session?.ordinary === false;
       const archived = session?.archived === true;
-      const tooLong = supported && prepared.text.length > (session?.maxTextChars ?? 131072);
+      const tooLong = supported && prepared.text.length > 131072;
       const editable = data.source?.kind === "user" && Number.isSafeInteger(data.seq) && data.seq >= 0 && supported && !owned && !archived && !tooLong;
       const reason = owned ? t("error.owned-session") : archived ? t("error.archived") : tooLong ? t("error.message-too-large") : t("plainTextOnly");
       const target = {
@@ -987,81 +845,10 @@
         available && !anchor && h("span", { "data-session-edit-control": true }, button)
       );
     }
-    function ComposerNotice(props) {
-      const t = useTranslation();
-      const state = useState();
-      const entry = state.sessions[props.sessionId];
-      const notice = state.notice?.action === "continue" && state.notice.sessionId === props.sessionId ? state.notice : null;
-      const error = notice || entry?.error;
-      if (!error) return null;
-      return h(
-        "div",
-        { className: "dsh-se-composer-notice", role: "alert" },
-        h(WarningIcon),
-        h("span", null, explain(error, t)),
-        notice ? h(Button, { size: "sm", onClick: controller.clearNotice }, t("close")) : h(Button, {
-          size: "sm",
-          disabled: entry.loading,
-          onClick: () => void controller.loadSession(props.sessionId, true).catch(() => {
-          })
-        }, t("refresh"))
-      );
-    }
-    function History({ current }) {
-      const t = useTranslation();
-      const history = current.view === "editor" ? current.historyState : current;
-      return h(
-        React.Fragment,
-        null,
-        current.error && current.view === "history" && h("p", { className: "dsh-se-error", role: "alert" }, explain(current.error, t)),
-        current.loading && !history.messages.length && h("p", { className: "dsh-se-muted", role: "status" }, t("loading")),
-        history.nextBeforeSeq !== null && h(Button, {
-          size: "sm",
-          disabled: current.loading || current.view === "editor",
-          onClick: () => void controller.loadOlder(),
-          "data-testid": "load-older"
-        }, t(current.loading ? "loading" : "loadOlder")),
-        !current.loading && !history.messages.length && h("p", { className: "dsh-se-muted" }, t("emptyHistory")),
-        h("ol", { className: "dsh-se-message-list" }, ...history.messages.map(
-          (message) => h(
-            "li",
-            { key: message.messageId || message.eventSeq, className: "dsh-se-message", "data-event-seq": message.eventSeq },
-            current.view === "editor" && current.eventSeq === message.eventSeq ? h(MessageEditor, { current }) : h(
-              React.Fragment,
-              null,
-              h(
-                "p",
-                { className: "dsh-se-message-text" },
-                [
-                  ...(message.attachments || []).map((item) => `[${item.name || item.type}]`),
-                  ...message.text ? [message.text] : []
-                ].join(" ")
-              ),
-              !message.editable && h("p", { className: "dsh-se-muted" }, explain(message.reason || "message-not-editable", t)),
-              h(
-                "div",
-                { className: "dsh-se-row-actions" },
-                h("time", { dateTime: new Date(message.time).toISOString() }, clock(message.time)),
-                action(t("editTitle"), EditIcon, () => void controller.openEdit({ ...message, sessionId: current.sessionId, title: current.title }), {
-                  unavailable: !message.editable,
-                  busy: controller.isBusy(current.sessionId, "edit", message.eventSeq)
-                }),
-                action(t("retryTitle"), RetryIcon, () => void controller.retryMessage({ ...message, sessionId: current.sessionId }), {
-                  unavailable: !message.editable,
-                  busy: controller.isBusy(current.sessionId, "retry", message.eventSeq)
-                })
-              )
-            )
-          )
-        ))
-      );
-    }
     function Overlay() {
       const t = useTranslation();
       const state = useState();
-      const current = state.panel;
-      const historyOpen = current && (current.view === "history" || current.placement === "history");
-      const notice = state.notice?.action !== "continue" ? state.notice : null;
+      const notice = state.notice;
       return h(
         React.Fragment,
         null,
@@ -1076,24 +863,13 @@
             controller.clearNotice();
             void controller.openResult({ sourceSessionId: notice.sessionId, historyUpdated: notice.historyUpdated });
           } }] : void 0
-        }),
-        h(Modal, {
-          open: Boolean(historyOpen),
-          onClose: controller.close,
-          title: t("historyTitle"),
-          closeLabel: t("close"),
-          description: current?.title || t("untitled"),
-          className: "dsh-se-history-modal",
-          footer: h(Button, { size: "sm", onClick: controller.close }, t("close"))
-        }, historyOpen && h("div", { "data-testid": "session-edit-dialog" }, h(History, { current })))
+        })
       );
     }
     const register = (name, options, component) => ctx.slots.inject(name, () => ctx.slots.register({ name, ...options }, component));
-    register("sidebar.workspaces.session.menu.item", { id: "dsh-session-edit.history", order: 450, label: () => translate("menu") }, HistoryMenu);
     register("shell.overlay", { id: "dsh-session-edit.dialog", order: 120 }, Overlay);
     for (const key of ["user", "steering"]) register("conversation.chat.node", { key, priority: -100 }, UserMessage);
     register("conversation.input.right", { id: "dsh-session-edit.primary", order: 100 }, ComposerContinue);
-    register("conversation.input.dock", { id: "dsh-session-edit.notice", order: 10 }, ComposerNotice);
   }
   window.__ModuleLoader__.load({
     id: "dsh-session-edit",

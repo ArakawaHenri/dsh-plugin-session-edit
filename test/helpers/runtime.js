@@ -120,7 +120,7 @@ export async function createRuntime(t, config = {}, runtimeOptions = {}) {
   ctx.provide('sessionController', { resolveAgent: id => controller.resolveAgent(id) });
 
   const host = new HostAdapter(ctx);
-  const engine = new SessionEditEngine(ctx, config, { host });
+  const engine = new SessionEditEngine(ctx, { host });
 
   t.after(async () => {
     await engine.close();

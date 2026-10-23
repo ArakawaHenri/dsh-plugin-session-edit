@@ -167,12 +167,12 @@ async function settled(f) {
 
 function mounted(f) {
   assert.equal(f.root.state, State.ACTIVE);
-  assert.equal(f.slots.size, 6);
+  assert.equal(f.slots.size, 4);
   assert.ok(f.slots.has('conversation.chat.node:user'));
   assert.ok(f.slots.has('conversation.chat.node:steering'));
   assert.equal(f.slots.get('conversation.chat.node:user').priority, -100);
   assert.ok(f.slots.has('conversation.input.right:dsh-session-edit.primary'));
-  assert.ok(f.slots.has('conversation.input.dock:dsh-session-edit.notice'));
+  assert.ok(f.slots.has('shell.overlay:dsh-session-edit.dialog'));
   assert.equal(f.dictionaries.size, 1);
   assert.equal(f.counts.calls, 0);
   assert.deepEqual(f.errors, []);
@@ -186,14 +186,10 @@ test('client waits for remote mount and releases its UI entries on unload', asyn
   f.release();
   await settled(f);
   mounted(f);
-  assert.equal(
-    f.slots.get('sidebar.workspaces.session.menu.item:dsh-session-edit.history').label(),
-    'Message history…',
-  );
   await f.root.dispose();
   assert.equal(f.slots.size, 0);
   assert.equal(f.dictionaries.size, 0);
-  assert.equal(f.counts.removedSlots, 6);
+  assert.equal(f.counts.removedSlots, 4);
   assert.equal(f.counts.removedLocale, 1);
   assert.equal(f.counts.calls, 0);
 });
@@ -214,7 +210,7 @@ test('late RPC namespace and namespace restart correctly suspend and remount UI'
   await settled(f);
   mounted(f);
   await f.root.dispose();
-  assert.equal(f.counts.removedSlots, 12);
+  assert.equal(f.counts.removedSlots, 8);
   assert.equal(f.counts.removedLocale, 2);
   assert.deepEqual(f.errors, []);
 });

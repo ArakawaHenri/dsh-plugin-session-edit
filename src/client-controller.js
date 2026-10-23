@@ -68,13 +68,9 @@ export function createClientController(options) {
     publish({
       panel: {
         sessionId,
-        title: '',
-        view: 'history',
         busy: false,
         loading: false,
         error: null,
-        messages: [],
-        nextBeforeSeq: null,
         ...properties,
       },
     });
@@ -145,17 +141,17 @@ export function createClientController(options) {
     if (!force && reads.has(sessionId)) return reads.get(sessionId);
     const loadId = ++sequence;
     const current = snapshot.sessions[sessionId];
-    setSessionEntry(sessionId, { ...current, loading: true, loadId, error: null });
+    setSessionEntry(sessionId, { ...current, loading: true, loadId });
     const task = (async () => {
       try {
-        const value = await call('inspect', { sessionId, limit: 30 });
+        const value = await call('inspect', { sessionId });
         if (!disposed && snapshot.sessions[sessionId]?.loadId === loadId) {
-          setSessionEntry(sessionId, { value, loading: false, error: null, loadId });
+          setSessionEntry(sessionId, { value, loading: false, loadId });
         }
         return value;
       } catch (error) {
         if (!disposed && snapshot.sessions[sessionId]?.loadId === loadId) {
-          setSessionEntry(sessionId, { ...current, loading: false, loadId, error: errorOf(error) });
+          setSessionEntry(sessionId, { ...current, loading: false, loadId });
         }
         throw error;
       } finally {
@@ -166,60 +162,13 @@ export function createClientController(options) {
     return task;
   }
 
-  async function openHistory(sessionId, title = '') {
-    const epoch = newPanel(sessionId, { title, loading: true });
-    try {
-      const value = await loadSession(sessionId, true);
-      if (value) {
-        updatePanel(
-          {
-            loading: false,
-            title: value.title || title,
-            messages: value.messages,
-            nextBeforeSeq: value.nextBeforeSeq,
-          },
-          epoch,
-        );
-      }
-    } catch (error) {
-      updatePanel({ loading: false, error: errorOf(error) }, epoch);
-    }
-  }
-
-  async function loadOlder() {
-    const current = snapshot.panel;
-    if (!current || current.loading || current.nextBeforeSeq === null) return;
-    const epoch = panelEpoch;
-    updatePanel({ loading: true, error: null });
-    try {
-      const value = await call('inspect', {
-        sessionId: current.sessionId,
-        beforeSeq: current.nextBeforeSeq,
-        limit: 30,
-      });
-      const map = new Map(
-        [...value.messages, ...current.messages].map(message => [message.eventSeq, message]),
-      );
-      updatePanel(
-        {
-          loading: false,
-          messages: [...map.values()].sort((a, b) => a.eventSeq - b.eventSeq),
-          nextBeforeSeq: value.nextBeforeSeq,
-        },
-        epoch,
-      );
-    } catch (error) {
-      updatePanel({ loading: false, error: errorOf(error) }, epoch);
-    }
-  }
-
   async function resolveTarget(target) {
     if (target.messageId && target.editable !== false) return target;
     const value = await call('inspect', {
       sessionId: target.sessionId,
       eventSeq: target.eventSeq,
     });
-    const message = value.messages.find(item => item.eventSeq === target.eventSeq);
+    const message = value.message;
     if (message && (
       (target.text !== undefined && target.text !== message.text) ||
       (target.time !== undefined && target.time !== message.time)
@@ -232,29 +181,15 @@ export function createClientController(options) {
         message: message?.reason || 'Select an editable user message',
       };
     }
-    return { ...target, ...message, title: value.title || target.title };
+    return { ...target, ...message };
   }
 
   async function openEdit(target) {
     const key = draftKey(target.sessionId, target.eventSeq, target.messageId);
-    const prior = snapshot.panel;
-    const history = prior?.view === 'editor' ? prior.historyState : prior;
-    const historyState =
-      history && prior.sessionId === target.sessionId && (prior.view === 'history' || prior.placement === 'history')
-        ? {
-            title: history.title,
-            messages: history.messages,
-            nextBeforeSeq: history.nextBeforeSeq,
-          }
-        : null;
     const epoch = newPanel(target.sessionId, {
-      title: target.title || prior?.title || '',
-      view: 'editor',
-      placement: historyState ? 'history' : 'message',
       eventSeq: target.eventSeq,
       text: drafts.get(key) ?? target.text ?? '',
       loading: true,
-      historyState,
     });
     try {
       const message = await resolveTarget(target);
@@ -263,7 +198,6 @@ export function createClientController(options) {
           messageId: message.messageId,
           text: drafts.get(draftKey(target.sessionId, target.eventSeq, message.messageId)) ?? message.text,
           loading: false,
-          title: message.title || target.title || '',
         },
         epoch,
       );
@@ -272,21 +206,9 @@ export function createClientController(options) {
     }
   }
 
-  function backToHistory() {
-    const current = snapshot.panel;
-    if (!current || current.busy || current.view !== 'editor' || !current.historyState) return;
-    newPanel(current.sessionId, {
-      title: current.historyState.title || current.title,
-      view: 'history',
-      messages: current.historyState.messages,
-      nextBeforeSeq: current.historyState.nextBeforeSeq,
-      loading: false,
-    });
-  }
-
   function setText(text) {
     const current = snapshot.panel;
-    if (!current || current.busy || current.loading || current.view !== 'editor') return;
+    if (!current || current.busy || current.loading) return;
     drafts.set(draftKey(current.sessionId, current.eventSeq, current.messageId), text);
     updatePanel({ text, error: null });
   }
@@ -295,7 +217,6 @@ export function createClientController(options) {
     const current = snapshot.panel;
     if (
       !current ||
-      current.view !== 'editor' ||
       current.busy ||
       current.loading ||
       !current.messageId ||
@@ -337,20 +258,9 @@ export function createClientController(options) {
     return true;
   }
 
-  function reportActionError(sessionId, epoch, error) {
-    const normalized = errorOf(error);
-    if (!disposed && epoch === panelEpoch && snapshot.panel?.sessionId === sessionId) {
-      updatePanel({ busy: false, loading: false, error: normalized }, epoch);
-    } else if (!disposed) {
-      publish({ notice: normalized });
-    }
-  }
-
   function retryMessage(target) {
     return oneShot(actionKey(target.sessionId, 'retry', target.eventSeq), async () => {
       const epoch = panelEpoch;
-      const inPanel = snapshot.panel?.sessionId === target.sessionId;
-      if (inPanel) updatePanel({ busy: true, error: null }, epoch);
       try {
         const message = await resolveTarget(target);
         const result = await call('execute', {
@@ -362,8 +272,8 @@ export function createClientController(options) {
         if (disposed) return;
         await openResult(result, epoch);
       } catch (error) {
-        if (!await reportSavedFailure(target.sessionId, epoch, error)) {
-          reportActionError(target.sessionId, epoch, error);
+        if (!await reportSavedFailure(target.sessionId, epoch, error) && !disposed) {
+          publish({ notice: errorOf(error) });
         }
       }
     });
@@ -378,8 +288,8 @@ export function createClientController(options) {
         if (!facts) return;
         if (!facts.continuation.available) {
           throw {
-            code: `session-edit/${facts.continuation.reason || 'not-resumable'}`,
-            message: facts.continuation.reason || 'Continuation unavailable',
+            code: 'session-edit/continuation-unsupported',
+            message: 'Continuation unavailable',
           };
         }
         await call('execute', {
@@ -391,7 +301,7 @@ export function createClientController(options) {
         // without navigating, moving focus, or closing an inline editor.
         await loadSession(sessionId, true).catch(() => {});
       } catch (error) {
-        publish({ notice: { ...errorOf(error), sessionId, action: 'continue' } });
+        publish({ notice: errorOf(error) });
       }
     });
   }
@@ -403,10 +313,7 @@ export function createClientController(options) {
       return () => listeners.delete(listener);
     },
     loadSession,
-    openHistory,
-    loadOlder,
     openEdit,
-    backToHistory,
     retryMessage,
     continueSession,
     setText,

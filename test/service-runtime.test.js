@@ -109,7 +109,10 @@ test('editing stops the old running turn and preserves the title and current mod
   const agent = f.ctx.agents.get(source.agent.id);
   await agent.whenIdle();
   assert.equal(canceled, true);
-  assert.equal((await f.engine.inspect({ sessionId: agent.id })).title, 'My conversation');
+  assert.deepEqual(
+    agent.session.snapshotEvents().findLast(e => e.type === 'session/title')?.data.title,
+    'My conversation',
+  );
   assert.deepEqual(f.requests.at(-1).messages.filter(m => m.role === 'user').map(text), ['Changed request.']);
   assert.equal(f.requests.at(-1).model, 'current-model');
 });
@@ -127,34 +130,18 @@ test('runtime-owned Agents cannot be edited even when their durable header has n
   await assert.rejects(f.submit(editCommand(child.agent, userEvents(events)[0])), code('owned-session'));
 });
 
-test('inspection pages are ascending and exact message resolution stays read-only for a cold session', options, async t => {
+test('exact message resolution stays read-only for a cold session', options, async t => {
   const f = await createRuntime(t);
   const source = await f.createSource();
   for (const value of ['one', 'two', 'three']) await f.send(source.agent, value);
   const before = await f.readStored(source.agent.id);
   await source.dispose();
-  const latest = await f.engine.inspect({ sessionId: source.agent.id, limit: 2 });
-  assert.deepEqual(
-    latest.messages.map(message => message.text),
-    ['two', 'three'],
-  );
-  const older = await f.engine.inspect({
-    sessionId: source.agent.id,
-    beforeSeq: latest.nextBeforeSeq,
-    limit: 2,
-  });
-  assert.deepEqual(
-    older.messages.map(message => message.text),
-    ['one'],
-  );
-  assert.equal(older.nextBeforeSeq, null);
-  assert.ok(older.messages[0].eventSeq < latest.messages[0].eventSeq);
   const selected = await f.engine.inspect({
     sessionId: source.agent.id,
     eventSeq: userEvents(before)[1].seq,
   });
-  assert.deepEqual(selected.messages, [latest.messages[0]]);
-  assert.equal(selected.nextBeforeSeq, null);
+  assert.equal(selected.message.text, 'two');
+  assert.equal(selected.message.editable, true);
   await assert.rejects(
     f.engine.inspect({
       sessionId: source.agent.id,
@@ -431,7 +418,6 @@ test('editing the first message refreshes an auto-generated title without pinnin
   const snapshot = f.ctx.sessionTitle.get(regenerated.session);
   assert.equal(snapshot?.title, 'Updated first prompt');
   assert.deepEqual(snapshot?.source, { kind: 'fallback' });
-  assert.equal((await f.engine.inspect({ sessionId: regenerated.id })).title, 'Updated first prompt');
 });
 
 test('editing and retrying messages with image and file attachments preserves durable attachment references', options, async t => {
@@ -460,12 +446,8 @@ test('editing and retrying messages with image and file attachments preserves du
     ],
   });
   const target = userEvents(events)[0];
-  const inspected = await f.engine.inspect({ sessionId: source.agent.id });
-  assert.equal(inspected.messages[0].editable, true);
-  assert.deepEqual(inspected.messages[0].attachments, [
-    { type: 'image', name: 'screenshot.png' },
-    { type: 'file', name: 'spec.md' },
-  ]);
+  const inspected = await f.engine.inspect({ sessionId: source.agent.id, eventSeq: target.seq });
+  assert.equal(inspected.message.editable, true);
 
   await f.engine.execute(editCommand(source.agent, target, 'edit', 'Updated instructions for attachments.'));
   const editedAgent = f.ctx.agents.get(source.agent.id);

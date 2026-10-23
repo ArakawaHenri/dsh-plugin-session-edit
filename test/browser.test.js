@@ -175,10 +175,8 @@ function bootFixture() {
     await plugin.apply(context(plugin.inject));
 
     const get = key => fixture.slots.get(key).component;
-    const Menu = get('sidebar.workspaces.session.menu.item:dsh-session-edit.history');
     const User = get('conversation.chat.node:user');
     const Primary = get('conversation.input.right:dsh-session-edit.primary');
-    const Notice = get('conversation.input.dock:dsh-session-edit.notice');
     const Overlay = get('shell.overlay:dsh-session-edit.dialog');
     const useSession = selector =>
       React.useSyncExternalStore(
@@ -242,12 +240,6 @@ function bootFixture() {
       return h(
         'main',
         null,
-        fixture.extension && h(Menu, {
-          sessionId: 'source',
-          displayTitle: 'Source',
-          useRemoteAccess,
-          useMenuOpenState: () => React.useState(false),
-        }),
         fixture.extension && h(User, {
           sessionId: 'source',
           node: message,
@@ -256,7 +248,6 @@ function bootFixture() {
           renderFactorySlot: factory,
           loadImage: async () => null,
         }),
-        fixture.extension && h(Notice, common),
         h(window.NativeInputBar, {
           ...common, variant: 'composer', keyboard, inputActions: { pruneAttachments() {} },
           disabled: fixture.locked,
@@ -304,25 +295,12 @@ async function fixture(t, options = {}) {
   };
   const facts = {
     sessionId: 'source',
-    title: 'Source conversation',
     status: 'idle',
     archived: false,
     ordinary: true,
     headSeq: 80,
-    messages: [
-      {
-        eventSeq: 40,
-        messageId: 'message-40',
-        text: 'Newest user input',
-        time: 1760000000000,
-        editable: true,
-      },
-    ],
-    nextBeforeSeq: 40,
     continuation: {
       available: state.continuationAvailable,
-      tailRole: 'assistant',
-      reason: state.reason,
     },
   };
   const selected = {
@@ -375,8 +353,8 @@ async function fixture(t, options = {}) {
       let value;
       if (method === 'inspect') {
         value =
-          input.eventSeq !== undefined || input.beforeSeq !== undefined
-            ? { ...facts, nextBeforeSeq: null, messages: [selected] }
+          input.eventSeq !== undefined
+            ? { ...facts, message: selected }
             : facts;
       }
       if (method === 'execute') {
@@ -392,8 +370,6 @@ async function fixture(t, options = {}) {
         } else {
           if (input.action === 'edit') selected.text = input.replacementText;
           selected.messageId = 'updated-message-7';
-          facts.messages = [{ ...selected }];
-          facts.nextBeforeSeq = null;
           facts.status = 'running';
           value = { sourceSessionId: 'source', historyUpdated: true };
         }
@@ -453,20 +429,11 @@ test('browser: native inline editing submits once without opening a dialog', asy
   assert.deepEqual(await page.evaluate(() => fixture.navigation), ['source']);
 });
 
-test('browser: history fallback pages then retries in one click even while the parent is running', async t => {
+test('browser: one-click retry works while the session is running', async t => {
   const { page, state, facts } = await fixture(t);
   facts.status = 'running';
   await page.evaluate(() => fixture.setRunning(true));
-  await page.getByRole('menuitem', { name: 'Message history…' }).click();
-  await page.getByTestId('load-older').click();
-  const item = page.locator('[data-event-seq="7"]');
-  await item.waitFor();
-  await item.getByRole('button', { name: 'Edit', exact: true }).click();
-  await item.getByRole('textbox', { name: 'Message' }).fill('An unsent history edit');
-  await item.getByRole('textbox', { name: 'Message' }).press('Escape');
-  assert.equal(await page.getByRole('dialog').count(), 1);
-  assert.equal(await page.getByTestId('session-edit-inline').count(), 0);
-  await item.getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await page.waitForFunction(() => fixture.navigation.length === 1);
   const command = state.calls.find(call => call.method === 'execute').input;
   assert.deepEqual(command, {
@@ -475,11 +442,6 @@ test('browser: history fallback pages then retries in one click even while the p
     eventSeq: 7,
     messageId: 'message-7',
   });
-  assert.equal(
-    state.calls.some(call => call.method === 'inspect' && call.input.eventSeq !== undefined),
-    false,
-  );
-  assert.equal(await page.getByTestId('session-edit-dialog').count(), 0);
 });
 
 test('browser: available continuation is one click and never adds prompt text', async t => {
@@ -492,7 +454,6 @@ test('browser: available continuation is one click and never adds prompt text', 
     sessionId: 'source',
     action: 'continue',
   });
-  assert.equal(await page.getByTestId('session-edit-dialog').count(), 0);
 });
 
 test('browser: a forbidden response shows an alert banner', async t => {
@@ -612,16 +573,14 @@ test('browser: failed inline edits retain their text and report the error beside
   assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
 });
 
-test('browser: continuation failure stays at the composer and can be dismissed', async t => {
+test('browser: continuation failure surfaces a toast alert', async t => {
   const { page, state } = await fixture(t, {
     rejectExecute: { code: 'session-edit/host-error', message: 'Failed' },
   });
   await page.getByTestId('session-edit-resume').click();
-  await page.locator('.dsh-se-composer-notice').getByText('Host error').waitFor();
+  await page.getByRole('alert').filter({ hasText: 'Host error' }).waitFor();
   assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
   assert.deepEqual(await page.evaluate(() => fixture.navigation), []);
-  await page.locator('.dsh-se-composer-notice').getByRole('button', { name: 'Close' }).click();
-  assert.equal(await page.locator('.dsh-se-composer-notice').count(), 0);
 });
 
 test('browser: blocked composers, claimed commands and pending queues keep their native primary', async t => {

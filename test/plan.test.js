@@ -182,12 +182,11 @@ test('plan verifies message identity, preserves image and file attachments on ed
 
 test('continuation requires an unfinished turn and no pending queue', () => {
   const { events, clearQueue } = fixture();
-  assert.equal(continuationPolicy(events).reason, 'queue-pending');
+  assert.equal(continuationPolicy(events).available, false);
   clearQueue();
   assert.equal(continuationPolicy(events).available, true);
   events.findLast(e => e.type === 'turn/end').data.reason.reason.kind = 'disposed';
   assert.equal(continuationPolicy(events).available, false);
-  assert.equal(continuationPolicy(events).reason, 'not-resumable');
 });
 
 test('unknown assistant-tail models allow direct continuation', () => {
@@ -196,7 +195,6 @@ test('unknown assistant-tail models allow direct continuation', () => {
   delete events.find(e => e.type === 'assistant/message').data.message.source.replayState;
   const policy = continuationPolicy(events);
   assert.equal(policy.available, true);
-  assert.equal(policy.tailRole, 'assistant');
   const plan = planOperation({ action: 'continue' }, snapshot);
   assert.deepEqual(plan, {
     sessionId: 'source',
@@ -227,7 +225,6 @@ for (const stopReason of ['aborted', 'error']) {
       stopReason;
     const policy = continuationPolicy(events);
     assert.equal(policy.available, false);
-    assert.equal(policy.reason, 'partial-replay-unavailable');
     assert.throws(
       () => planOperation({ action: 'continue' }, snapshot),
       error => error.code === 'session-edit/continuation-unsupported',
@@ -243,7 +240,6 @@ test('an unpaired tool call blocks direct continuation', () => {
     .data.message.content.push({ type: 'tool-call', id: 'call-1', name: 'fixture', input: {} });
   const policy = continuationPolicy(events);
   assert.equal(policy.available, false);
-  assert.equal(policy.reason, 'unresolved-tools');
 });
 
 test('surface replacement position does not make an older replacement the conversation tail', () => {
@@ -317,10 +313,9 @@ test('trailing developer or system messages on the surface do not obscure the co
   );
   const policy = continuationPolicy(events);
   assert.equal(policy.available, true);
-  assert.equal(policy.tailRole, 'assistant');
 });
 
-test('a second-step inbox claim aborted before message admission is detected as input-not-admitted', () => {
+test('a second-step inbox claim aborted before message admission is detected as not resumable', () => {
   const { events, push, clearQueue } = fixture();
   clearQueue();
   push('agent/inbox/spliced', {
@@ -336,7 +331,6 @@ test('a second-step inbox claim aborted before message admission is detected as 
   });
   const policy = continuationPolicy(events);
   assert.equal(policy.available, false);
-  assert.equal(policy.reason, 'input-not-admitted');
 });
 
 test('adapter-defaulted reasoningEffort is not turned into an explicit model selection', () => {

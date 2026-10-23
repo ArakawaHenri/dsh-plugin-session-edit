@@ -80,29 +80,6 @@
 }
 .dsh-se-primary:disabled { opacity: .4; cursor: default; }
 
-.dsh-se-composer-notice {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 0 auto 6px;
-  padding: 6px 10px;
-  width: 100%;
-  max-width: var(--dsh-composer-card-max-width);
-  border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-secondary);
-  font-size: 13px;
-}
-.dsh-se-composer-notice > svg { flex: none; }
-.dsh-se-composer-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-
-.dsh-se-history-modal { width: min(640px, calc(100vw - 32px)); }
-.dsh-se-message-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
-.dsh-se-message { min-width: 0; padding-bottom: 12px; border-bottom: .5px solid var(--dsw-alias-border-l4); }
-.dsh-se-message:last-child { border-bottom: 0; }
-.dsh-se-message-text { margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
-
 @media (hover: none), (max-width: 720px) {
   .dsh-se-row > .dsh-se-row-actions { opacity: 1; }
 }
