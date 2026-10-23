@@ -117,6 +117,41 @@ test('editing stops the old running turn and preserves the title and current mod
   assert.equal(f.requests.at(-1).model, 'current-model');
 });
 
+test('retry keeps a model selected while an older request was being prepared', options, async t => {
+  const f = await createRuntime(t);
+  const source = await f.createSource();
+  f.agentController.selectionFor(source.agent);
+  const target = userEvents(await f.send(source.agent, 'Selected input.'))[0];
+  f.agentController.selectForNextRequest(source.agent, { provider: 'offline', model: 'model-a' });
+
+  const preparing = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const prepare = f.ctx.llm.prepareCall.bind(f.ctx.llm);
+  let delay = true;
+  f.ctx.llm.prepareCall = async call => {
+    if (delay) {
+      delay = false;
+      preparing.resolve();
+      await release.promise;
+    }
+    return prepare(call);
+  };
+  try {
+    source.agent.followup(human('Later input.'));
+    await preparing.promise;
+    f.agentController.selectForNextRequest(source.agent, { provider: 'offline', model: 'model-b' });
+  } finally {
+    release.resolve();
+  }
+  await source.agent.whenIdle();
+  assert.equal(f.requests.at(-1).model, 'model-a');
+  assert.equal(f.ctx.sessionProjections.stateOf(source.agent.session, 'modelSelection').pending.model, 'model-b');
+
+  await f.engine.execute(editCommand(source.agent, target));
+  await f.ctx.agents.get(source.agent.id).whenIdle();
+  assert.equal(f.requests.at(-1).model, 'model-b');
+});
+
 test('runtime-owned Agents cannot be edited even when their durable header has no parent lineage', options, async t => {
   const f = await createRuntime(t);
   const owner = await f.createSource();

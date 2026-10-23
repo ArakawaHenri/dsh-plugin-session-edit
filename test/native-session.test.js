@@ -31,7 +31,7 @@ function fixture(resync) {
     handleSessionAdded() {},
   };
   const sessions = { binding: () => ({ session }), manager, refresh: async () => { refreshes++; } };
-  return { reload: createSessionReloader(sessions), session, manager, projections, events, read, refreshes: () => refreshes };
+  return { reload: createSessionReloader(sessions), sessions, session, manager, projections, events, read, refreshes: () => refreshes };
 }
 
 test('native projection faces and history accept the shorter replacement baseline', async () => {
@@ -63,4 +63,23 @@ test('a second rewrite during reload obtains another baseline without duplicatin
   await second;
   assert.equal(calls, 2);
   assert.equal(f.refreshes(), 1);
+});
+
+test('a second rewrite during the final list refresh also reloads the history', async () => {
+  const refreshing = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let calls = 0;
+  const f = fixture(async () => { calls++; });
+  f.sessions.refresh = async () => {
+    refreshing.resolve();
+    await release.promise;
+  };
+  const first = f.reload('source');
+  await refreshing.promise;
+  f.session.removed = true;
+  const second = f.reload('source', { sessionId: 'source' });
+  release.resolve();
+  await Promise.all([first, second]);
+  assert.equal(calls, 2);
+  assert.equal(f.session.removed, false);
 });

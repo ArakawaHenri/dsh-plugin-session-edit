@@ -475,24 +475,28 @@
         do {
           entry.changed = false;
           const session = sessions.binding(sessionId)?.session;
-          if (!session) break;
           const manager = sessions.manager;
-          if (typeof session.resync !== "function" || typeof session.projections?.clear !== "function" || !manager?.projectionStores) {
+          const projections = session?.projections ?? manager?.projectionStores?.get(sessionId);
+          if (!manager?.projectionStores || session && typeof session.resync !== "function" || projections && typeof projections.clear !== "function") {
             throw new Error("This DSH client cannot reload edited session history.");
           }
           manager.projectionInflight.get(sessionId)?.controller.abort();
           manager.projectionInflight.delete(sessionId);
           manager.projectionLoads.delete(sessionId);
-          session.projections.clear();
-          manager.projectionStores.set(sessionId, session.projections);
-          session.removed = false;
-          session.promptError = null;
-          session.lastAgentError = null;
+          projections?.clear();
+          if (session) {
+            manager.projectionStores.set(sessionId, projections);
+            session.removed = false;
+            session.promptError = null;
+            session.lastAgentError = null;
+          }
           if (entry.summary) manager.handleSessionAdded(entry.summary);
-          await session.resync();
-          if (session.getSnapshot().openState === "error") throw session.getSnapshot().openError;
+          if (session) {
+            await session.resync();
+            if (session.getSnapshot().openState === "error") throw session.getSnapshot().openError;
+          }
+          if (!entry.changed) await sessions.refresh();
         } while (entry.changed);
-        await sessions.refresh();
       }).finally(() => pending.delete(sessionId));
       pending.set(sessionId, entry);
       return entry.promise;
@@ -642,9 +646,13 @@
       reloadSession
     });
     ctx.effect(() => () => controller.dispose());
+    const removedSessions = /* @__PURE__ */ new Set();
+    ctx.effect(() => ctx.remote.$on("api-session/removed", (sessionId) => {
+      removedSessions.add(sessionId);
+    }));
     ctx.effect(() => ctx.remote.$on("api-session/added", (summary) => {
       const session = ctx.sessions.binding(summary.sessionId)?.session;
-      if (session?.getSnapshot().removed) {
+      if (removedSessions.delete(summary.sessionId) || session?.getSnapshot().removed) {
         void reloadSession(summary.sessionId, summary).then(() => {
           if (controller.getSnapshot().sessions[summary.sessionId]) {
             return controller.loadSession(summary.sessionId, true).catch(() => {

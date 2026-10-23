@@ -15,27 +15,32 @@ export function createSessionReloader(sessions) {
       do {
         entry.changed = false;
         const session = sessions.binding(sessionId)?.session;
-        if (!session) break;
         const manager = sessions.manager;
-        if (typeof session.resync !== 'function' || typeof session.projections?.clear !== 'function' ||
-          !manager?.projectionStores) {
+        const projections = session?.projections ?? manager?.projectionStores?.get(sessionId);
+        if (!manager?.projectionStores || (session && typeof session.resync !== 'function') ||
+          (projections && typeof projections.clear !== 'function')) {
           throw new Error('This DSH client cannot reload edited session history.');
         }
         manager.projectionInflight.get(sessionId)?.controller.abort();
         manager.projectionInflight.delete(sessionId);
         manager.projectionLoads.delete(sessionId);
-        session.projections.clear();
-        // Native removal can drop the manager's store; retain the faces to which
-        // this Session and the conversation's hooks already subscribe.
-        manager.projectionStores.set(sessionId, session.projections);
-        session.removed = false;
-        session.promptError = null;
-        session.lastAgentError = null;
+        projections?.clear();
+        if (session) {
+          // Native removal can drop the manager's store; retain the faces to which
+          // this Session and the conversation's hooks already subscribe.
+          manager.projectionStores.set(sessionId, projections);
+          session.removed = false;
+          session.promptError = null;
+          session.lastAgentError = null;
+        }
         if (entry.summary) manager.handleSessionAdded(entry.summary);
-        await session.resync();
-        if (session.getSnapshot().openState === 'error') throw session.getSnapshot().openError;
+        if (session) {
+          await session.resync();
+          if (session.getSnapshot().openState === 'error') throw session.getSnapshot().openError;
+        }
+        // A second rewrite can arrive while the list refresh is still in flight.
+        if (!entry.changed) await sessions.refresh();
       } while (entry.changed);
-      await sessions.refresh();
     }).finally(() => pending.delete(sessionId));
     pending.set(sessionId, entry);
     return entry.promise;

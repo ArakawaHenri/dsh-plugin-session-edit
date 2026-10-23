@@ -59,9 +59,11 @@ function mountUI(ctx, React, { createPortal }, ui) {
   });
   ctx.effect(() => () => controller.dispose());
   // Native lifecycle edges also reach windows that did not initiate the edit.
+  const removedSessions = new Set();
+  ctx.effect(() => ctx.remote.$on('api-session/removed', sessionId => { removedSessions.add(sessionId); }));
   ctx.effect(() => ctx.remote.$on('api-session/added', summary => {
     const session = ctx.sessions.binding(summary.sessionId)?.session;
-    if (session?.getSnapshot().removed) {
+    if (removedSessions.delete(summary.sessionId) || session?.getSnapshot().removed) {
       void reloadSession(summary.sessionId, summary)
         .then(() => {
           if (controller.getSnapshot().sessions[summary.sessionId]) {

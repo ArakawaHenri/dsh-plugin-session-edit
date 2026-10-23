@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Context, Service } from '@deepseek-ai/cordis';
 import { buildClientSource } from '../scripts/build-client.js';
 
 const clientSource = await buildClientSource();
+const controllerRoot = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-api-session-controller'));
+const { SessionManager } = await import(pathToFileURL(join(controllerRoot, 'types/client/sessions/manager.js')));
 const State = { PENDING: 0, LOADING: 1, ACTIVE: 2, FAILED: 3, DISPOSED: 4 };
 const slotKey = options => `${options.name}:${options.key || options.id || ''}`;
 
@@ -37,10 +42,11 @@ function loadPlugin() {
   });
 }
 
-function fixture(t, { lateNamespace = false, deferredMount = false } = {}) {
+function fixture(t, { lateNamespace = false, deferredMount = false, sessions = {} } = {}) {
   const ctx = new Context();
   const slots = new Map();
   const dictionaries = new Map();
+  const remoteListeners = new Map();
   const fibers = new Set();
   const errors = [];
   const counts = { mounts: 0, calls: 0, removedSlots: 0, removedLocale: 0 };
@@ -116,7 +122,12 @@ function fixture(t, { lateNamespace = false, deferredMount = false } = {}) {
     constructor() {
       super(ctx, 'remote');
     }
-    $on() { return () => {}; }
+    $on(name, listener) {
+      const listeners = remoteListeners.get(name) ?? new Set();
+      remoteListeners.set(name, listeners);
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
     async $mount(contribution) {
       counts.mounts++;
       assert.equal(contribution.package, 'dsh-session-edit');
@@ -133,7 +144,8 @@ function fixture(t, { lateNamespace = false, deferredMount = false } = {}) {
   new Slots();
   new Locale();
   new Remote();
-  for (const name of ['uiSession', 'sessions']) ctx.provide(name, {});
+  ctx.provide('uiSession', {});
+  ctx.provide('sessions', sessions);
   ctx.provide('uiWorkspace', {
     openSession() {
       assert.fail('Startup must never navigate');
@@ -151,6 +163,9 @@ function fixture(t, { lateNamespace = false, deferredMount = false } = {}) {
     root,
     slots,
     dictionaries,
+    emitRemote(name, value) {
+      for (const listener of remoteListeners.get(name) ?? []) listener(value);
+    },
     errors,
     counts,
     entered: entered.promise,
@@ -212,5 +227,40 @@ test('late RPC namespace and namespace restart correctly suspend and remount UI'
   await f.root.dispose();
   assert.equal(f.counts.removedSlots, 8);
   assert.equal(f.counts.removedLocale, 2);
+  assert.deepEqual(f.errors, []);
+});
+
+test('a rewrite in another window clears cached projections without an open session', async t => {
+  const manager = new SessionManager({});
+  t.after(() => manager.dispose());
+  const f = fixture(t, { sessions: { manager, binding: () => undefined, refresh: async () => {} } });
+  await settled(f);
+  const summary = { sessionId: 'source', createdAt: 1, running: false, blank: false, cwd: '/tmp' };
+  manager.handleSessionAdded({
+    ...summary,
+    projections: {
+      kind: 'sequenced', asOfSeq: 100,
+      values: { title: 'Old title', subagentCatalog: [{ id: 'child', mode: 'continuable' }] },
+    },
+  });
+  const projections = manager.projectionStores.get('source');
+  const title = projections.faceOf('title');
+  manager.handleSessionRemoved('source');
+  f.emitRemote('api-session/removed', 'source');
+  assert.equal(manager.projectionStores.get('source'), projections);
+
+  const values = { title: 'Edited title', subagentCatalog: [] };
+  const added = { ...summary, projections: { kind: 'sequenced', asOfSeq: 10, values } };
+  manager.handleSessionAdded(added);
+  f.emitRemote('api-session/added', added);
+  await new Promise(setImmediate);
+  assert.equal(title.getSnapshot(), 'Edited title');
+  assert.deepEqual(projections.get('subagentCatalog'), []);
+  assert.equal(manager.sessions.size, 0);
+
+  const session = manager.get('source');
+  session.projections.seed({ asOfSeq: 10, values });
+  assert.equal(session.projections.faceOf('title'), title);
+  assert.deepEqual(session.projections.values(), values);
   assert.deepEqual(f.errors, []);
 });

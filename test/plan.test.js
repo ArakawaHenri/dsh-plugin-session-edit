@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   continuationPolicy,
   foldInbox,
+  modelOf,
   rewriteSeed,
   planOperation,
   surfaceEvents,
@@ -354,6 +355,20 @@ test('adapter-defaulted reasoningEffort is not turned into an explicit model sel
     snapshot,
   );
   assert.deepEqual(plan.modelSelection, { provider: 'offline', model: 'stub' });
+});
+
+test('a pending model selection is consumed only by a matching request, including effort', () => {
+  const { events, push } = log();
+  const selected = { provider: 'offline', model: 'selected', reasoningEffort: 'high' };
+  push('model/selection', selected);
+  push('request/header', { header: { config: { ...selected, reasoningEffort: 'low' } } });
+  assert.deepEqual(modelOf(events), selected);
+  push('request/header', { header: { config: selected } });
+  const later = { provider: 'offline', model: 'later' };
+  push('request/header', {
+    header: { config: { ...later, reasoningEffort: 'medium' }, adapterDefaults: { reasoningEffort: true } },
+  });
+  assert.deepEqual(modelOf(events), later);
 });
 
 test('rewriteSeed drops stale auto-titles on edit, preserves valid auto-titles on retry, and keeps plan/mode', () => {
