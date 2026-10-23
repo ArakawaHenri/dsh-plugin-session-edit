@@ -43,11 +43,11 @@ function clock(time) {
 function mountUI(ctx, React, { createPortal }, ui) {
   const h = React.createElement;
   const {
-    Button, InlineEditor, Menu, MenuItemButton, Modal, Toast, Tooltip, writeClipboard,
+    Button, InlineEditor, MenuItemButton, Modal, Toast, Tooltip, writeClipboard,
     IconEditOutlineRegular: EditIcon, IconRefreshOutlineRegular: RetryIcon,
     IconCopyOutlineRegular: CopyIcon, IconCheckOutlineRegular: CheckIcon,
     IconTriangleRightFillRegular: PlayIcon,
-    IconEllipsisOutlineRegular: MoreIcon, IconWarningOutlineRegular: WarningIcon,
+    IconWarningOutlineRegular: WarningIcon,
   } = ui;
   ctx.effect(() => ctx.locale.register(namespace, dictionaries));
   const translate = ctx.locale.bind(namespace);
@@ -55,7 +55,6 @@ function mountUI(ctx, React, { createPortal }, ui) {
   const controller = createClientController({
     rpc: ctx.remote.sessionEdit,
     navigate: id => ctx.uiWorkspace.openSession(id),
-    getLocale: () => ctx.locale.getSnapshot(),
     reloadSession,
   });
   ctx.effect(() => () => controller.dispose());
@@ -242,7 +241,7 @@ function mountUI(ctx, React, { createPortal }, ui) {
       facts?.ordinary && !facts.archived && facts.status !== 'running' && facts.continuation.available;
     const replace = Boolean(available && anchor?.editable && anchor.disabled);
     usePrimaryReplacement(React, anchor, replace);
-    const button = h(Tooltip, { label: t('noMessageDescription'), side: 'top', portal: true },
+    const button = h(Tooltip, { label: t('confirmContinue'), side: 'top', portal: true },
       h('button', {
         type: 'button', className: anchor?.className || 'dsh-se-primary',
         'aria-label': t('confirmContinue'), 'data-testid': 'session-edit-resume',
@@ -255,40 +254,6 @@ function mountUI(ctx, React, { createPortal }, ui) {
       h('span', { ref: marker, hidden: true, 'data-session-edit-control': true }),
       replace && createPortal(h('span', { className: 'dsh-se-primary-seat', 'data-session-edit-control': true }, button), anchor.parent),
       available && !anchor && h('span', { 'data-session-edit-control': true }, button),
-    );
-  }
-
-  function ContinueStatus(props) {
-    const t = useTranslation();
-    const allowed = canExecute(props);
-    const running = props.useSession(s => s.running);
-    const entry = useState(s => s.sessions[props.sessionId]);
-    const busy = useState(() => controller.isBusy(props.sessionId, 'continue'));
-    const [open, setOpen] = React.useState(false);
-    React.useEffect(() => setOpen(false), [props.sessionId, running]);
-    const facts = entry?.value;
-    if (!allowed || running || !facts?.ordinary || facts.archived || facts.status === 'running' ||
-      (!facts.continuation.available && !facts.continuation.canSendPrompt)) return null;
-    return h('div', { className: 'dsh-se-status', 'data-testid': 'session-edit-continue' },
-      h('span', null, t('stopped')),
-      h(Menu, {
-        open, onClose: () => setOpen(false), portal: true, side: 'top', align: 'end', compact: true,
-        anchor: h(Tooltip, { label: t('continueOptions'), side: 'top' },
-          h('button', {
-            type: 'button', className: 'dsh-se-action', 'aria-label': t('continueOptions'),
-            'aria-expanded': open, 'aria-haspopup': 'menu', disabled: busy || entry.loading,
-            onClick: () => setOpen(value => !value),
-          }, h(MoreIcon)),
-        ),
-        items: [
-          ...(!facts.continuation.available ? [{ type: 'label', id: 'reason', text: explain(facts.continuation.reason, t) }] : []),
-          { id: 'prompt', label: t('confirmPrompt'), disabled: !facts.continuation.canSendPrompt },
-        ],
-        onSelect: () => {
-          setOpen(false);
-          void controller.continueSession(props.sessionId, 'prompt');
-        },
-      }),
     );
   }
 
@@ -375,7 +340,6 @@ function mountUI(ctx, React, { createPortal }, ui) {
   register('shell.overlay', { id: 'dsh-session-edit.dialog', order: 120 }, Overlay);
   for (const key of ['user', 'steering']) register('conversation.chat.node', { key, priority: -100 }, UserMessage);
   register('conversation.input.right', { id: 'dsh-session-edit.primary', order: 100 }, ComposerContinue);
-  register('conversation.composer.dock', { id: 'dsh-session-edit.continue', order: 10 }, ContinueStatus);
   register('conversation.input.dock', { id: 'dsh-session-edit.notice', order: 10 }, ComposerNotice);
 }
 

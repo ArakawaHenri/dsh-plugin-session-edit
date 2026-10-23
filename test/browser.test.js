@@ -177,7 +177,6 @@ function bootFixture() {
     const get = key => fixture.slots.get(key).component;
     const Menu = get('sidebar.workspaces.session.menu.item:dsh-session-edit.history');
     const User = get('conversation.chat.node:user');
-    const Dock = get('conversation.composer.dock:dsh-session-edit.continue');
     const Primary = get('conversation.input.right:dsh-session-edit.primary');
     const Notice = get('conversation.input.dock:dsh-session-edit.notice');
     const Overlay = get('shell.overlay:dsh-session-edit.dialog');
@@ -270,7 +269,7 @@ function bootFixture() {
           useStopShortcut: select => select([]),
           useProjection: (_name, select) => select ? select(undefined) : undefined,
           renderSlot: name => !fixture.extension ? null : name === 'conversation.input.right'
-            ? h(Primary, common) : name === 'conversation.composer.dock' ? h(Dock, common) : null,
+            ? h(Primary, common) : null,
         }),
         fixture.extension && h(Overlay),
       );
@@ -322,7 +321,6 @@ async function fixture(t, options = {}) {
     nextBeforeSeq: 40,
     continuation: {
       available: state.continuationAvailable,
-      canSendPrompt: state.canSendPrompt ?? true,
       tailRole: 'assistant',
       reason: state.reason,
     },
@@ -493,24 +491,8 @@ test('browser: available continuation is one click and never adds prompt text', 
   assert.deepEqual(command, {
     sessionId: 'source',
     action: 'continue',
-    continuationMode: 'no-message',
   });
   assert.equal(await page.getByTestId('session-edit-dialog').count(), 0);
-});
-
-test('browser: unsupported direct continuation exposes explicit prompt mode in the native menu', async t => {
-  const { page, state } = await fixture(t, {
-    continuationAvailable: false,
-    reason: 'model-disabled',
-  });
-  const dock = page.getByTestId('session-edit-continue');
-  await dock.waitFor();
-  assert.equal(await page.getByTestId('session-edit-resume').count(), 0);
-  await dock.getByRole('button', { name: 'Continue options' }).click();
-  await page.getByRole('menuitem', { name: 'Send "continue"', exact: true }).click();
-  await page.waitForFunction(() => fixture.session.running);
-  assert.equal(state.calls.find(call => call.method === 'execute').input.continuationMode, 'prompt');
-  assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
 });
 
 test('browser: a forbidden response shows an alert banner', async t => {
@@ -630,7 +612,7 @@ test('browser: failed inline edits retain their text and report the error beside
   assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
 });
 
-test('browser: continuation failure stays at the composer and prompt fallback is explicit', async t => {
+test('browser: continuation failure stays at the composer and can be dismissed', async t => {
   const { page, state } = await fixture(t, {
     rejectExecute: { code: 'session-edit/host-error', message: 'Failed' },
   });
@@ -638,11 +620,8 @@ test('browser: continuation failure stays at the composer and prompt fallback is
   await page.locator('.dsh-se-composer-notice').getByText('Host error').waitFor();
   assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
   assert.deepEqual(await page.evaluate(() => fixture.navigation), []);
-  state.rejectExecute = null;
-  await page.getByRole('button', { name: 'Continue options' }).click();
-  await page.getByRole('menuitem', { name: 'Send "continue"' }).click();
-  await page.waitForFunction(() => fixture.session.running);
-  assert.deepEqual(state.calls.filter(call => call.method === 'execute').map(call => call.input.continuationMode), ['no-message', 'prompt']);
+  await page.locator('.dsh-se-composer-notice').getByRole('button', { name: 'Close' }).click();
+  assert.equal(await page.locator('.dsh-se-composer-notice').count(), 0);
 });
 
 test('browser: blocked composers, claimed commands and pending queues keep their native primary', async t => {
@@ -677,11 +656,10 @@ test('browser: unloading restores the original button and retains the native edi
   assert.equal(await page.evaluate(() => fixture.sent[0].text), 'Still the native editor');
 });
 
-test('browser: completed sessions have neither a resume button nor a continuation menu', async t => {
-  const { page } = await fixture(t, { continuationAvailable: false, canSendPrompt: false, reason: 'not-resumable' });
+test('browser: completed sessions do not show a resume button', async t => {
+  const { page } = await fixture(t, { continuationAvailable: false, reason: 'not-resumable' });
   await page.waitForFunction(() => fixture.inspectReplies > 0);
   assert.equal(await page.getByTestId('session-edit-resume').count(), 0);
-  assert.equal(await page.getByRole('button', { name: 'Continue options' }).count(), 0);
 });
 
 test('browser: a rewrite from another window reloads the existing conversation', async t => {

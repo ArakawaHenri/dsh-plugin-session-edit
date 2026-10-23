@@ -24,7 +24,7 @@ function fixture(overrides = {}) {
     headSeq: 100,
     messages: [message(30), message(40)],
     nextBeforeSeq: 30,
-    continuation: { available: true, canSendPrompt: true, tailRole: 'assistant' },
+    continuation: { available: true, tailRole: 'assistant' },
   };
   const handlers = {
     inspect: request =>
@@ -50,7 +50,6 @@ function fixture(overrides = {}) {
   const controller = createClientController({
     rpc,
     navigate: id => navigated.push(id),
-    getLocale: () => 'en',
   });
   return { controller, calls, navigated, facts };
 }
@@ -247,25 +246,20 @@ test('editing from history preserves the paged list and returns to it', async ()
   f.controller.dispose();
 });
 
-test('continuation attempts an available model directly and prompt mode is explicit', async () => {
+test('continuation attempts an available session directly and surfaces unavailable reason', async () => {
   const f = fixture();
   await f.controller.continueSession('source');
   assert.deepEqual(f.calls.find(call => call.name === 'execute').request, {
     sessionId: 'source',
     action: 'continue',
-    continuationMode: 'no-message',
   });
   f.controller.dispose();
 
   const denied = fixture();
-  denied.facts.continuation = { available: false, canSendPrompt: true, reason: 'model-disabled' };
+  denied.facts.continuation = { available: false, reason: 'unresolved-tools' };
   await denied.controller.continueSession('source');
   assert.equal(denied.calls.filter(call => call.name === 'execute').length, 0);
-  assert.equal(denied.controller.getSnapshot().notice.code, 'session-edit/model-disabled');
-  await denied.controller.continueSession('source', 'prompt');
-  const promptRequest = denied.calls.find(call => call.name === 'execute').request;
-  assert.equal(promptRequest.continuationMode, 'prompt');
-  assert.equal(promptRequest.promptLocale, 'en');
+  assert.equal(denied.controller.getSnapshot().notice.code, 'session-edit/unresolved-tools');
   denied.controller.dispose();
 });
 

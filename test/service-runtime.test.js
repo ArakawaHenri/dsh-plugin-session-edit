@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import SessionTitleService from '@deepseek-ai/dsh-session-title';
 import { createRuntime, chunks, code, human, text, userEvents } from './helpers/runtime.js';
-import { continuePromptText } from '../lib/plan.js';
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork';
 import { z } from 'zod';
 
@@ -249,7 +248,7 @@ test('direct continuation retains native tool execution and subsequent model ste
   assert.equal(f.requests[2].messages.at(-1).content[0].text, '14');
 });
 
-test('a failed direct continuation attempt leaves manual prompt continuation available', options, async t => {
+test('a failed direct continuation attempt leaves the session resumable without adding user messages', options, async t => {
   const f = await createRuntime(t);
   const source = await f.createSource();
   const before = await f.stop(source.agent);
@@ -267,39 +266,11 @@ test('a failed direct continuation attempt leaves manual prompt continuation ava
   );
   const inspection = await f.engine.inspect({ sessionId: source.agent.id });
   assert.equal(inspection.continuation.available, true);
-  assert.equal(inspection.continuation.canSendPrompt, true);
   f.setResponse(normalResponse);
-  await f.submit({ sessionId: source.agent.id, action: 'continue', continuationMode: 'prompt' });
+  await f.submit({ sessionId: source.agent.id, action: 'continue' });
   await source.agent.whenIdle();
-  assert.equal(
-    text(userEvents(source.agent.session.snapshotEvents()).at(-1).data),
-    continuePromptText('zh', 'error'),
-  );
+  assert.equal(userEvents(source.agent.session.snapshotEvents()).length, userEvents(before).length);
   assert.equal(f.requests.length, 3);
-});
-
-test('explicit model denial blocks no-message admission but leaves prompt mode available', options, async t => {
-  const f = await createRuntime(t, {
-    continuationRules: [{ provider: 'offline', model: 'stub', allow: false }],
-  });
-  const source = await f.createSource();
-  await f.stop(source.agent);
-  const inspection = await f.engine.inspect({ sessionId: source.agent.id });
-  assert.equal(inspection.continuation.available, false);
-  assert.equal(inspection.continuation.reason, 'model-disabled');
-  assert.equal(inspection.continuation.canSendPrompt, true);
-  await assert.rejects(
-    f.submit({ sessionId: source.agent.id, action: 'continue' }),
-    code('continuation-unsupported'),
-  );
-  assert.equal(f.requests.length, 1);
-  await f.submit({ sessionId: source.agent.id, action: 'continue', continuationMode: 'prompt' });
-  await source.agent.whenIdle();
-  assert.equal(
-    text(userEvents(source.agent.session.snapshotEvents()).at(-1).data),
-    continuePromptText('zh', 'aborted'),
-  );
-  assert.equal(f.requests.length, 2);
 });
 
 test('a max-tokens turn can be explicitly continued without another user input', options, async t => {

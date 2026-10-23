@@ -1,6 +1,6 @@
 // Self-contained so the ModuleLoader build can inline it without Node modules.
 export function createClientController(options) {
-  const { rpc, navigate, getLocale, reloadSession } = options;
+  const { rpc, navigate, reloadSession } = options;
   const listeners = new Set();
   const drafts = new Map();
   const reads = new Map();
@@ -369,16 +369,14 @@ export function createClientController(options) {
     });
   }
 
-  function continueSession(sessionId, mode = 'no-message') {
-    return oneShot(actionKey(sessionId, 'continue', mode), async () => {
+  function continueSession(sessionId) {
+    return oneShot(actionKey(sessionId, 'continue'), async () => {
       publish({ notice: null });
       try {
         const cached = snapshot.sessions[sessionId]?.value;
         const facts = cached ?? (await loadSession(sessionId, true));
         if (!facts) return;
-        const allowed =
-          mode === 'prompt' ? facts.continuation.canSendPrompt : facts.continuation.available;
-        if (!allowed) {
+        if (!facts.continuation.available) {
           throw {
             code: `session-edit/${facts.continuation.reason || 'not-resumable'}`,
             message: facts.continuation.reason || 'Continuation unavailable',
@@ -387,10 +385,6 @@ export function createClientController(options) {
         await call('execute', {
           sessionId,
           action: 'continue',
-          continuationMode: mode,
-          ...(mode === 'prompt' && getLocale
-            ? { promptLocale: ['en', 'zh'].includes(getLocale()) ? getLocale() : 'zh' }
-            : {}),
         });
         if (disposed) return;
         // The composer already belongs to this session. Refresh admission facts

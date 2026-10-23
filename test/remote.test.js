@@ -138,7 +138,7 @@ test('all public descriptors use the strict direct request contract', () => {
   }
 });
 
-test('owner RPC methods round-trip the real Connection parser and default to no-message', async t => {
+test('owner RPC methods round-trip the real Connection parser', async t => {
   const f = rpcFixture(t);
   for (const method of methods) {
     const result = await f.invoke(method);
@@ -148,7 +148,10 @@ test('owner RPC methods round-trip the real Connection parser and default to no-
     });
   }
   assert.equal(f.calls.length, methods.length);
-  assert.equal(f.calls.find(call => call.method === 'execute').request.continuationMode, 'no-message');
+  assert.deepEqual(f.calls.find(call => call.method === 'execute').request, {
+    sessionId: 'fixture-session',
+    action: 'continue',
+  });
 });
 
 test('every remote operation is owner-only, including read-only inspection', async t => {
@@ -207,10 +210,10 @@ test('unknown fields, invalid identities and incomplete action combinations fail
 });
 
 test('wire identities normalize consistently and seq zero is valid', () => {
-  assert.deepEqual(
-    parseRequest('execute', { ...valid.execute, continuationMode: 'prompt', promptLocale: 'en' }),
-    { sessionId: 'fixture-session', action: 'continue', continuationMode: 'prompt', promptLocale: 'en' },
-  );
+  assert.deepEqual(parseRequest('execute', valid.execute), {
+    sessionId: 'fixture-session',
+    action: 'continue',
+  });
   const fork = {
     sessionId: 's',
     action: 'edit',

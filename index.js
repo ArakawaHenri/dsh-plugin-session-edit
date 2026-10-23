@@ -18,15 +18,6 @@ export const inject = [
 
 export const Config = z.object({
   maxTextChars: z.natural().min(1).max(131072).default(131072),
-  continuationRules: z
-    .array(
-      z.object({
-        provider: z.string().min(1).required(),
-        model: z.string().min(1).required(),
-        allow: z.boolean().default(true),
-      }),
-    )
-    .default([]),
 });
 
 export class SessionEditService extends TypertRemoteService {

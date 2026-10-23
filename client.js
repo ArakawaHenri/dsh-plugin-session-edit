@@ -46,9 +46,7 @@
         "action",
         "eventSeq",
         "messageId",
-        "replacementText",
-        "continuationMode",
-        "promptLocale"
+        "replacementText"
       ]);
       const output = {
         sessionId: expectString(value.sessionId, "sessionId"),
@@ -61,23 +59,7 @@
         if (value.eventSeq !== void 0 || value.messageId !== void 0 || value.replacementText !== void 0) {
           throw new TypeError("Continuation does not accept message target fields.");
         }
-        output.continuationMode = value.continuationMode ?? "no-message";
-        if (!["no-message", "prompt"].includes(output.continuationMode)) {
-          throw new TypeError("Invalid continuationMode.");
-        }
-        if (value.promptLocale !== void 0) {
-          if (output.continuationMode !== "prompt") {
-            throw new TypeError('promptLocale requires continuationMode "prompt".');
-          }
-          if (!["en", "zh"].includes(value.promptLocale)) {
-            throw new TypeError("Invalid promptLocale.");
-          }
-          output.promptLocale = value.promptLocale;
-        }
       } else {
-        if (value.continuationMode !== void 0 || value.promptLocale !== void 0) {
-          throw new TypeError("Only continuation accepts continuationMode or promptLocale.");
-        }
         output.eventSeq = expectSeq(value.eventSeq, "eventSeq");
         output.messageId = expectString(value.messageId, "messageId");
         if (value.action === "edit") {
@@ -106,9 +88,7 @@
           action: { enum: ["edit", "retry", "continue"] },
           eventSeq: seqSchema,
           messageId: idSchema,
-          replacementText: { type: "string", minLength: 1, maxLength: 131072 },
-          continuationMode: { enum: ["no-message", "prompt"] },
-          promptLocale: { enum: ["en", "zh"] }
+          replacementText: { type: "string", minLength: 1, maxLength: 131072 }
         },
         required: ["sessionId", "action"]
       }
@@ -149,7 +129,7 @@
 
   // src/client-controller.js
   function createClientController(options) {
-    const { rpc, navigate, getLocale, reloadSession } = options;
+    const { rpc, navigate, reloadSession } = options;
     const listeners = /* @__PURE__ */ new Set();
     const drafts = /* @__PURE__ */ new Map();
     const reads = /* @__PURE__ */ new Map();
@@ -479,15 +459,14 @@
         }
       });
     }
-    function continueSession(sessionId, mode = "no-message") {
-      return oneShot(actionKey(sessionId, "continue", mode), async () => {
+    function continueSession(sessionId) {
+      return oneShot(actionKey(sessionId, "continue"), async () => {
         publish({ notice: null });
         try {
           const cached = snapshot.sessions[sessionId]?.value;
           const facts = cached ?? await loadSession(sessionId, true);
           if (!facts) return;
-          const allowed = mode === "prompt" ? facts.continuation.canSendPrompt : facts.continuation.available;
-          if (!allowed) {
+          if (!facts.continuation.available) {
             throw {
               code: `session-edit/${facts.continuation.reason || "not-resumable"}`,
               message: facts.continuation.reason || "Continuation unavailable"
@@ -495,9 +474,7 @@
           }
           await call("execute", {
             sessionId,
-            action: "continue",
-            continuationMode: mode,
-            ...mode === "prompt" && getLocale ? { promptLocale: ["en", "zh"].includes(getLocale()) ? getLocale() : "zh" } : {}
+            action: "continue"
           });
           if (disposed) return;
           await loadSession(sessionId, true).catch(() => {
@@ -630,7 +607,6 @@
     cancel: "Cancel",
     confirmEdit: "Regenerate",
     confirmContinue: "Continue",
-    confirmPrompt: 'Send "continue"',
     copy: "Copy",
     copied: "Copied",
     copyFailed: "Copy failed",
@@ -638,7 +614,6 @@
     loadOlder: "Load earlier",
     emptyHistory: "No messages",
     textLabel: "Message",
-    noMessageDescription: "Continue",
     openConversation: "Open",
     navigationFailed: "Could not open session",
     plainTextOnly: "Unsupported content",
@@ -662,7 +637,6 @@
     "error.unresolved-tools": "Unfinished tool calls",
     "error.unsupported-tail": "Direct continue unavailable",
     "error.partial-replay-unavailable": "Model cannot resume partial output",
-    "error.model-disabled": "Direct continue disabled for this model",
     "error.owned-session": "Subagent session",
     "error.attachments-not-supported": "Unsupported attachment",
     "error.message-too-large": "Message too long",
@@ -671,8 +645,6 @@
     "error.invalid-history": "Invalid session history",
     "error.host-error": "Host error",
     "error.closing": "Plugin is unloading",
-    stopped: "Stopped",
-    continueOptions: "Continue options",
     sending: "Sending\u2026",
     refresh: "Refresh",
     "error.unsupported-backend": "JSONL storage required",
@@ -691,7 +663,6 @@
     cancel: "\u53D6\u6D88",
     confirmEdit: "\u91CD\u65B0\u751F\u6210",
     confirmContinue: "\u7EE7\u7EED",
-    confirmPrompt: "\u53D1\u9001\u201C\u7EE7\u7EED\u201D",
     copy: "\u590D\u5236",
     copied: "\u5DF2\u590D\u5236",
     copyFailed: "\u590D\u5236\u5931\u8D25",
@@ -699,7 +670,6 @@
     loadOlder: "\u52A0\u8F7D\u66F4\u65E9",
     emptyHistory: "\u6682\u65E0\u6D88\u606F",
     textLabel: "\u6D88\u606F\u5185\u5BB9",
-    noMessageDescription: "\u7EE7\u7EED",
     openConversation: "\u6253\u5F00",
     navigationFailed: "\u672A\u80FD\u6253\u5F00\u4F1A\u8BDD",
     plainTextOnly: "\u4E0D\u652F\u6301\u6B64\u5185\u5BB9\u7C7B\u578B",
@@ -723,7 +693,6 @@
     "error.unresolved-tools": "\u5DE5\u5177\u8C03\u7528\u672A\u5B8C\u6210",
     "error.unsupported-tail": "\u4E0D\u652F\u6301\u76F4\u63A5\u7EE7\u7EED",
     "error.partial-replay-unavailable": "\u5F53\u524D\u6A21\u578B\u4E0D\u652F\u6301\u76F4\u63A5\u7EED\u5199",
-    "error.model-disabled": "\u6B64\u6A21\u578B\u5DF2\u7981\u7528\u76F4\u63A5\u7EE7\u7EED",
     "error.owned-session": "\u5B50\u667A\u80FD\u4F53\u4F1A\u8BDD",
     "error.attachments-not-supported": "\u4E0D\u652F\u6301\u6B64\u9644\u4EF6",
     "error.message-too-large": "\u8D85\u51FA\u957F\u5EA6\u9650\u5236",
@@ -732,8 +701,6 @@
     "error.invalid-history": "\u5386\u53F2\u6570\u636E\u5F02\u5E38",
     "error.host-error": "\u6267\u884C\u5931\u8D25",
     "error.closing": "\u63D2\u4EF6\u6B63\u5728\u5378\u8F7D",
-    stopped: "\u5DF2\u505C\u6B62",
-    continueOptions: "\u7EE7\u7EED\u9009\u9879",
     sending: "\u53D1\u9001\u4E2D\u2026",
     refresh: "\u5237\u65B0",
     "error.unsupported-backend": "\u4EC5\u652F\u6301 JSONL \u5B58\u50A8",
@@ -742,7 +709,7 @@
   };
 
   // src/client.css
-  var client_default = ".dsh-se-row {\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  min-width: 0;\n}\n\n.dsh-se-row-actions,\n.dsh-se-editor-actions {\n  display: flex;\n  align-items: center;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 4px;\n}\n\n.dsh-se-row-actions {\n  color: var(--dsw-alias-label-tertiary);\n  font-size: 12px;\n}\n\n.dsh-se-row-actions time { margin-right: 6px; }\n\n.dsh-se-action {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 28px;\n  height: 28px;\n  padding: 0;\n  border: 0;\n  border-radius: var(--dsw-radius-sm);\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary);\n  cursor: pointer;\n}\n\n.dsh-se-action:hover:not(:disabled) {\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n}\n\n.dsh-se-action:disabled,\n.dsh-se-action[aria-disabled='true'] { opacity: .4; cursor: default; }\n\n.dsh-se-row > .dsh-se-row-actions { opacity: 0; }\n.dsh-se-row:hover > .dsh-se-row-actions,\n.dsh-se-row:focus-within > .dsh-se-row-actions { opacity: 1; }\n\n.dsh-se-editor { width: 100%; min-width: 0; }\n.dsh-se-editor-field { display: flex; border: 0; padding: 0; margin: 0; min-width: 0; }\n.dsh-se-editor-input {\n  width: 100%;\n  min-height: 72px;\n  max-height: 320px;\n  padding: 10px 12px;\n  font-family: var(--dsw-font-family);\n  font-size: var(--dsh-content-font-size, 14px);\n  line-height: calc(24px + var(--dsh-content-font-delta, 0px));\n}\n.dsh-se-editor-actions { gap: 8px; margin-top: 8px; }\n.dsh-se-editor-actions > .dsh-se-muted { margin-right: auto; }\n\n.dsh-se-error { color: var(--dsw-alias-state-error-primary); margin: 0 0 8px; font-size: 13px; }\n.dsh-se-muted { color: var(--dsw-alias-label-secondary); margin: 0; font-size: 13px; }\n\n[data-session-edit-suppressed] { display: none !important; }\n.dsh-se-primary-seat { display: inline-flex; flex: none; }\n/* Used only if a host replaces the InputBar and no native primary can be found. */\n.dsh-se-primary {\n  display: grid;\n  place-items: center;\n  width: 34px;\n  height: 34px;\n  border: 0;\n  border-radius: 999px;\n  background: var(--dsw-alias-button-info-fill);\n  color: var(--dsw-alias-label-primary-foreground);\n  cursor: pointer;\n}\n.dsh-se-primary:disabled { opacity: .4; cursor: default; }\n.dsh-se-status { display: inline-flex; align-items: center; gap: 2px; color: var(--dsw-alias-label-tertiary); font-size: 12px; }\n.dsh-se-status .dsh-se-action { width: 24px; height: 24px; }\n\n.dsh-se-composer-notice {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 8px;\n  margin: 0 auto 6px;\n  padding: 6px 10px;\n  width: 100%;\n  max-width: var(--dsh-composer-card-max-width);\n  border-radius: var(--dsw-radius-md);\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n  font-size: 13px;\n}\n.dsh-se-composer-notice > svg { flex: none; }\n.dsh-se-composer-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }\n\n.dsh-se-history-modal { width: min(640px, calc(100vw - 32px)); }\n.dsh-se-message-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }\n.dsh-se-message { min-width: 0; padding-bottom: 12px; border-bottom: .5px solid var(--dsw-alias-border-l4); }\n.dsh-se-message:last-child { border-bottom: 0; }\n.dsh-se-message-text { margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }\n\n@media (hover: none), (max-width: 720px) {\n  .dsh-se-row > .dsh-se-row-actions { opacity: 1; }\n}\n@media (pointer: coarse) {\n  .dsh-se-action, .dsh-se-status .dsh-se-action { min-width: 36px; min-height: 36px; }\n}\n";
+  var client_default = ".dsh-se-row {\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  min-width: 0;\n}\n\n.dsh-se-row-actions,\n.dsh-se-editor-actions {\n  display: flex;\n  align-items: center;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 4px;\n}\n\n.dsh-se-row-actions {\n  color: var(--dsw-alias-label-tertiary);\n  font-size: 12px;\n}\n\n.dsh-se-row-actions time { margin-right: 6px; }\n\n.dsh-se-action {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 28px;\n  height: 28px;\n  padding: 0;\n  border: 0;\n  border-radius: var(--dsw-radius-sm);\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary);\n  cursor: pointer;\n}\n\n.dsh-se-action:hover:not(:disabled) {\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n}\n\n.dsh-se-action:disabled,\n.dsh-se-action[aria-disabled='true'] { opacity: .4; cursor: default; }\n\n.dsh-se-row > .dsh-se-row-actions { opacity: 0; }\n.dsh-se-row:hover > .dsh-se-row-actions,\n.dsh-se-row:focus-within > .dsh-se-row-actions { opacity: 1; }\n\n.dsh-se-editor { width: 100%; min-width: 0; }\n.dsh-se-editor-field { display: flex; border: 0; padding: 0; margin: 0; min-width: 0; }\n.dsh-se-editor-input {\n  width: 100%;\n  min-height: 72px;\n  max-height: 320px;\n  padding: 10px 12px;\n  font-family: var(--dsw-font-family);\n  font-size: var(--dsh-content-font-size, 14px);\n  line-height: calc(24px + var(--dsh-content-font-delta, 0px));\n}\n.dsh-se-editor-actions { gap: 8px; margin-top: 8px; }\n\n.dsh-se-error { color: var(--dsw-alias-state-error-primary); margin: 0 0 8px; font-size: 13px; }\n.dsh-se-muted { color: var(--dsw-alias-label-secondary); margin: 0; font-size: 13px; }\n\n[data-session-edit-suppressed] { display: none !important; }\n.dsh-se-primary-seat { display: inline-flex; flex: none; }\n/* Used only if a host replaces the InputBar and no native primary can be found. */\n.dsh-se-primary {\n  display: grid;\n  place-items: center;\n  width: 34px;\n  height: 34px;\n  border: 0;\n  border-radius: 999px;\n  background: var(--dsw-alias-button-info-fill);\n  color: var(--dsw-alias-label-primary-foreground);\n  cursor: pointer;\n}\n.dsh-se-primary:disabled { opacity: .4; cursor: default; }\n\n.dsh-se-composer-notice {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 8px;\n  margin: 0 auto 6px;\n  padding: 6px 10px;\n  width: 100%;\n  max-width: var(--dsh-composer-card-max-width);\n  border-radius: var(--dsw-radius-md);\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n  font-size: 13px;\n}\n.dsh-se-composer-notice > svg { flex: none; }\n.dsh-se-composer-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }\n\n.dsh-se-history-modal { width: min(640px, calc(100vw - 32px)); }\n.dsh-se-message-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }\n.dsh-se-message { min-width: 0; padding-bottom: 12px; border-bottom: .5px solid var(--dsw-alias-border-l4); }\n.dsh-se-message:last-child { border-bottom: 0; }\n.dsh-se-message-text { margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }\n\n@media (hover: none), (max-width: 720px) {\n  .dsh-se-row > .dsh-se-row-actions { opacity: 1; }\n}\n@media (pointer: coarse) {\n  .dsh-se-action { min-width: 36px; min-height: 36px; }\n}\n";
 
   // src/client.entry.js
   var dictionaries = { en: en_default, zh: zh_default };
@@ -779,7 +746,6 @@
     const {
       Button,
       InlineEditor,
-      Menu,
       MenuItemButton,
       Modal,
       Toast,
@@ -790,7 +756,6 @@
       IconCopyOutlineRegular: CopyIcon,
       IconCheckOutlineRegular: CheckIcon,
       IconTriangleRightFillRegular: PlayIcon,
-      IconEllipsisOutlineRegular: MoreIcon,
       IconWarningOutlineRegular: WarningIcon
     } = ui;
     ctx.effect(() => ctx.locale.register(namespace, dictionaries));
@@ -799,7 +764,6 @@
     const controller = createClientController({
       rpc: ctx.remote.sessionEdit,
       navigate: (id) => ctx.uiWorkspace.openSession(id),
-      getLocale: () => ctx.locale.getSnapshot(),
       reloadSession
     });
     ctx.effect(() => () => controller.dispose());
@@ -1004,7 +968,7 @@
       usePrimaryReplacement(React, anchor, replace);
       const button = h(
         Tooltip,
-        { label: t("noMessageDescription"), side: "top", portal: true },
+        { label: t("confirmContinue"), side: "top", portal: true },
         h("button", {
           type: "button",
           className: anchor?.className || "dsh-se-primary",
@@ -1021,51 +985,6 @@
         h("span", { ref: marker, hidden: true, "data-session-edit-control": true }),
         replace && createPortal(h("span", { className: "dsh-se-primary-seat", "data-session-edit-control": true }, button), anchor.parent),
         available && !anchor && h("span", { "data-session-edit-control": true }, button)
-      );
-    }
-    function ContinueStatus(props) {
-      const t = useTranslation();
-      const allowed = canExecute(props);
-      const running = props.useSession((s) => s.running);
-      const entry = useState((s) => s.sessions[props.sessionId]);
-      const busy = useState(() => controller.isBusy(props.sessionId, "continue"));
-      const [open, setOpen] = React.useState(false);
-      React.useEffect(() => setOpen(false), [props.sessionId, running]);
-      const facts = entry?.value;
-      if (!allowed || running || !facts?.ordinary || facts.archived || facts.status === "running" || !facts.continuation.available && !facts.continuation.canSendPrompt) return null;
-      return h(
-        "div",
-        { className: "dsh-se-status", "data-testid": "session-edit-continue" },
-        h("span", null, t("stopped")),
-        h(Menu, {
-          open,
-          onClose: () => setOpen(false),
-          portal: true,
-          side: "top",
-          align: "end",
-          compact: true,
-          anchor: h(
-            Tooltip,
-            { label: t("continueOptions"), side: "top" },
-            h("button", {
-              type: "button",
-              className: "dsh-se-action",
-              "aria-label": t("continueOptions"),
-              "aria-expanded": open,
-              "aria-haspopup": "menu",
-              disabled: busy || entry.loading,
-              onClick: () => setOpen((value) => !value)
-            }, h(MoreIcon))
-          ),
-          items: [
-            ...!facts.continuation.available ? [{ type: "label", id: "reason", text: explain(facts.continuation.reason, t) }] : [],
-            { id: "prompt", label: t("confirmPrompt"), disabled: !facts.continuation.canSendPrompt }
-          ],
-          onSelect: () => {
-            setOpen(false);
-            void controller.continueSession(props.sessionId, "prompt");
-          }
-        })
       );
     }
     function ComposerNotice(props) {
@@ -1174,7 +1093,6 @@
     register("shell.overlay", { id: "dsh-session-edit.dialog", order: 120 }, Overlay);
     for (const key of ["user", "steering"]) register("conversation.chat.node", { key, priority: -100 }, UserMessage);
     register("conversation.input.right", { id: "dsh-session-edit.primary", order: 100 }, ComposerContinue);
-    register("conversation.composer.dock", { id: "dsh-session-edit.continue", order: 10 }, ContinueStatus);
     register("conversation.input.dock", { id: "dsh-session-edit.notice", order: 10 }, ComposerNotice);
   }
   window.__ModuleLoader__.load({

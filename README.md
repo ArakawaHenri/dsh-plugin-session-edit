@@ -12,17 +12,16 @@ sessions back up where they left off. Built against DSH `0.2.1-rc.2`.
 - **Retry** — regenerate from the selected message without changing its text,
   also in the same session.
 - **Continue** — for sessions stopped by hand, cut short by an error, or hit
-  with a token limit: either resume the model directly from existing history
-  (no new message), or send a continuation prompt (`继续` / `continue`).
+  with a token limit, resume the model directly from existing history without
+  adding a new user message.
 
 Message actions use DSH's native icons and tooltips. Editing opens the native
-inline editor at the selected message, with **Cancel** and **Save and regenerate**.
+inline editor at the selected message, with **Cancel** and **Regenerate**.
 The session menu also has a paginated history browser with inline editing.
 
 After a resumable stop, the empty composer's primary button becomes **Continue**.
 Typing text or adding attachments restores the native send action; running
-sessions retain DSH's stop, queue, and steering behavior. **Send continuation
-message** is available in the continuation options menu below the composer.
+sessions retain DSH's stop, queue, and steering behavior.
 
 History editing currently uses DSH's local JSONL storage, including compressed
 logs. The replacement is validated and written atomically under the session's
@@ -41,23 +40,14 @@ Refresh the page afterwards.
 
 ## Configuration
 
-Both settings are optional.
-
 ```yaml
 - id: session-edit
   name: 'dsh-session-edit'
   config:
     maxTextChars: 131072
-    continuationRules:
-      - provider: your-provider-id
-        model: your-model-id
-        allow: false
 ```
 
-`maxTextChars` caps the length of an edited message. `continuationRules`
-turns off no-message continuation for specific models (`model: '*'` works as
-a per-provider wildcard); sending a continuation prompt stays available
-either way.
+`maxTextChars` (optional) caps the length of an edited message.
 
 ## Development
 

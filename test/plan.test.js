@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CONTINUE_TEXT,
-  continuePromptText,
   continuationPolicy,
   foldInbox,
   rewriteSeed,
@@ -187,38 +185,24 @@ test('continuation requires an unfinished turn and no pending queue', () => {
   assert.equal(continuationPolicy(events).reason, 'queue-pending');
   clearQueue();
   assert.equal(continuationPolicy(events).available, true);
-  assert.equal(continuationPolicy(events).canSendPrompt, true);
   events.findLast(e => e.type === 'turn/end').data.reason.reason.kind = 'disposed';
-  assert.equal(continuationPolicy(events).canSendPrompt, false);
+  assert.equal(continuationPolicy(events).available, false);
+  assert.equal(continuationPolicy(events).reason, 'not-resumable');
 });
 
-test('unknown assistant-tail models allow a no-message attempt and explicit deny rules still apply', () => {
+test('unknown assistant-tail models allow direct continuation', () => {
   const { events, snapshot, clearQueue } = fixture();
   clearQueue();
   delete events.find(e => e.type === 'assistant/message').data.message.source.replayState;
   const policy = continuationPolicy(events);
   assert.equal(policy.available, true);
-  assert.equal(policy.canSendPrompt, true);
   assert.equal(policy.tailRole, 'assistant');
   const plan = planOperation({ action: 'continue' }, snapshot);
-  assert.equal(plan.continuationMode, 'no-message');
-  assert.equal(plan.content, undefined);
-  assert.deepEqual(planOperation({ action: 'continue', continuationMode: 'prompt' }, snapshot).content, [
-    { type: 'text', text: CONTINUE_TEXT },
-  ]);
-  assert.equal(
-    continuationPolicy(events, { rules: [{ provider: 'fixture', model: '*', allow: false }] }).reason,
-    'model-disabled',
-  );
-  assert.equal(
-    continuationPolicy(events, {
-      rules: [
-        { provider: 'fixture', model: '*', allow: true },
-        { provider: 'fixture', model: 'm', allow: false },
-      ],
-    }).reason,
-    'model-disabled',
-  );
+  assert.deepEqual(plan, {
+    sessionId: 'source',
+    action: 'continue',
+    headSeq: events.at(-1).seq,
+  });
 });
 
 for (const reason of [{ kind: 'error', error: 'offline rejection' }, { kind: 'max-tokens' }]) {
@@ -227,19 +211,11 @@ for (const reason of [{ kind: 'error', error: 'offline rejection' }, { kind: 'ma
     clearQueue();
     events.findLast(e => e.type === 'turn/end').data.reason = reason;
     assert.equal(continuationPolicy(events).available, true);
-    assert.equal(planOperation({ action: 'continue' }, snapshot).continuationMode, 'no-message');
-    assert.equal(
-      planOperation({ action: 'continue', continuationMode: 'prompt' }, snapshot).content[0].text,
-      continuePromptText('zh', reason.kind),
-    );
-    assert.equal(
-      planOperation(
-        { action: 'continue', continuationMode: 'prompt' },
-        snapshot,
-        { locale: 'en' },
-      ).content[0].text,
-      continuePromptText('en', reason.kind),
-    );
+    assert.deepEqual(planOperation({ action: 'continue' }, snapshot), {
+      sessionId: 'source',
+      action: 'continue',
+      headSeq: events.at(-1).seq,
+    });
   });
 }
 
@@ -252,7 +228,6 @@ for (const stopReason of ['aborted', 'error']) {
     const policy = continuationPolicy(events);
     assert.equal(policy.available, false);
     assert.equal(policy.reason, 'partial-replay-unavailable');
-    assert.equal(policy.canSendPrompt, true);
     assert.throws(
       () => planOperation({ action: 'continue' }, snapshot),
       error => error.code === 'session-edit/continuation-unsupported',
@@ -260,18 +235,15 @@ for (const stopReason of ['aborted', 'error']) {
   });
 }
 
-test('an unpaired tool call blocks no-message continuation even for an allowed model', () => {
+test('an unpaired tool call blocks direct continuation', () => {
   const { events, clearQueue } = fixture();
   clearQueue();
   events
     .find(e => e.type === 'assistant/message')
     .data.message.content.push({ type: 'tool-call', id: 'call-1', name: 'fixture', input: {} });
-  const policy = continuationPolicy(events, {
-    rules: [{ provider: 'fixture', model: 'm', allow: true }],
-  });
+  const policy = continuationPolicy(events);
   assert.equal(policy.available, false);
   assert.equal(policy.reason, 'unresolved-tools');
-  assert.equal(policy.canSendPrompt, true);
 });
 
 test('surface replacement position does not make an older replacement the conversation tail', () => {
@@ -345,7 +317,6 @@ test('trailing developer or system messages on the surface do not obscure the co
   );
   const policy = continuationPolicy(events);
   assert.equal(policy.available, true);
-  assert.equal(policy.canSendPrompt, true);
   assert.equal(policy.tailRole, 'assistant');
 });
 
@@ -365,7 +336,6 @@ test('a second-step inbox claim aborted before message admission is detected as 
   });
   const policy = continuationPolicy(events);
   assert.equal(policy.available, false);
-  assert.equal(policy.canSendPrompt, false);
   assert.equal(policy.reason, 'input-not-admitted');
 });
 

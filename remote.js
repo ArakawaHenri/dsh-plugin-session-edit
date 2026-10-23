@@ -50,8 +50,6 @@ export function remoteContribution() {
       'eventSeq',
       'messageId',
       'replacementText',
-      'continuationMode',
-      'promptLocale',
     ]);
     const output = {
       sessionId: expectString(value.sessionId, 'sessionId'),
@@ -64,23 +62,7 @@ export function remoteContribution() {
       if (value.eventSeq !== undefined || value.messageId !== undefined || value.replacementText !== undefined) {
         throw new TypeError('Continuation does not accept message target fields.');
       }
-      output.continuationMode = value.continuationMode ?? 'no-message';
-      if (!['no-message', 'prompt'].includes(output.continuationMode)) {
-        throw new TypeError('Invalid continuationMode.');
-      }
-      if (value.promptLocale !== undefined) {
-        if (output.continuationMode !== 'prompt') {
-          throw new TypeError('promptLocale requires continuationMode "prompt".');
-        }
-        if (!['en', 'zh'].includes(value.promptLocale)) {
-          throw new TypeError('Invalid promptLocale.');
-        }
-        output.promptLocale = value.promptLocale;
-      }
     } else {
-      if (value.continuationMode !== undefined || value.promptLocale !== undefined) {
-        throw new TypeError('Only continuation accepts continuationMode or promptLocale.');
-      }
       output.eventSeq = expectSeq(value.eventSeq, 'eventSeq');
       output.messageId = expectString(value.messageId, 'messageId');
       if (value.action === 'edit') {
@@ -111,8 +93,6 @@ export function remoteContribution() {
         eventSeq: seqSchema,
         messageId: idSchema,
         replacementText: { type: 'string', minLength: 1, maxLength: 131072 },
-        continuationMode: { enum: ['no-message', 'prompt'] },
-        promptLocale: { enum: ['en', 'zh'] },
       },
       required: ['sessionId', 'action'],
     },
