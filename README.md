@@ -13,8 +13,7 @@ sessions back up where they left off. Built against DSH `0.2.1-rc.2`.
   also in the same session.
 - **Continue** — for sessions stopped by hand, cut short by an error, or hit
   with a token limit: either resume the model directly from existing history
-  (no new message), or send a continuation prompt. The prompt wording follows
-  the interface language and the reason the session stopped.
+  (no new message), or send a continuation prompt (`继续` / `continue`).
 
 Message actions use DSH's native icons and tooltips. Editing opens the native
 inline editor at the selected message, with **Cancel** and **Save and regenerate**.
