@@ -430,11 +430,11 @@ test('browser: native inline editing submits once without opening a dialog', asy
   const body = await page.evaluate(() => fixture.factories.at(-1));
   assert.equal(body.name, 'conversation.chat.user.content');
   assert.deepEqual(body.facts, { sessionLabels: ['Source A'], skillNames: ['sample'] });
-  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await page.getByTestId('execute-action').waitFor();
   assert.equal(await page.getByRole('dialog').count(), 0);
   assert.equal(await page.locator('[data-session-edit-message="7"] textarea').count(), 1);
-  await page.getByRole('textbox', { name: 'Message text' }).fill('Changed message\nwith two lines');
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Changed message\nwith two lines');
   await page.getByTestId('execute-action').evaluate(button => {
     button.click();
     button.click();
@@ -459,16 +459,16 @@ test('browser: history fallback pages then retries in one click even while the p
   const { page, state, facts } = await fixture(t);
   facts.status = 'running';
   await page.evaluate(() => fixture.setRunning(true));
-  await page.getByRole('menuitem', { name: 'Edit history / retry…' }).click();
+  await page.getByRole('menuitem', { name: 'Message history…' }).click();
   await page.getByTestId('load-older').click();
   const item = page.locator('[data-event-seq="7"]');
   await item.waitFor();
-  await item.getByRole('button', { name: 'Edit message', exact: true }).click();
-  await item.getByRole('textbox', { name: 'Message text' }).fill('An unsent history edit');
-  await item.getByRole('textbox', { name: 'Message text' }).press('Escape');
+  await item.getByRole('button', { name: 'Edit', exact: true }).click();
+  await item.getByRole('textbox', { name: 'Message' }).fill('An unsent history edit');
+  await item.getByRole('textbox', { name: 'Message' }).press('Escape');
   assert.equal(await page.getByRole('dialog').count(), 1);
   assert.equal(await page.getByTestId('session-edit-inline').count(), 0);
-  await item.getByRole('button', { name: 'Regenerate from this message', exact: true }).click();
+  await item.getByRole('button', { name: 'Retry', exact: true }).click();
   await page.waitForFunction(() => fixture.navigation.length === 1);
   const command = state.calls.find(call => call.method === 'execute').input;
   assert.deepEqual(command, {
@@ -486,7 +486,7 @@ test('browser: history fallback pages then retries in one click even while the p
 
 test('browser: available continuation is one click and never adds prompt text', async t => {
   const { page, state } = await fixture(t);
-  await page.getByRole('button', { name: 'Continue task', exact: true }).click();
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await page.waitForFunction(() => fixture.session.running);
   assert.deepEqual(await page.evaluate(() => fixture.navigation), []);
   const command = state.calls.find(call => call.method === 'execute').input;
@@ -506,8 +506,8 @@ test('browser: unsupported direct continuation exposes explicit prompt mode in t
   const dock = page.getByTestId('session-edit-continue');
   await dock.waitFor();
   assert.equal(await page.getByTestId('session-edit-resume').count(), 0);
-  await dock.getByRole('button', { name: 'Continuation options' }).click();
-  await page.getByRole('menuitem', { name: 'Send continuation message', exact: true }).click();
+  await dock.getByRole('button', { name: 'Continue options' }).click();
+  await page.getByRole('menuitem', { name: 'Send "continue"', exact: true }).click();
   await page.waitForFunction(() => fixture.session.running);
   assert.equal(state.calls.find(call => call.method === 'execute').input.continuationMode, 'prompt');
   assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
@@ -517,8 +517,8 @@ test('browser: a forbidden response shows an alert banner', async t => {
   const { page } = await fixture(t, {
     rejectExecute: { code: 'session-edit/forbidden', message: 'Only owner' },
   });
-  await page.getByRole('button', { name: 'Regenerate from this message', exact: true }).click();
-  await page.getByRole('alert').filter({ hasText: 'Only the host owner' }).waitFor();
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.getByRole('alert').filter({ hasText: 'Permission denied' }).waitFor();
 });
 
 test('browser: image and file attachments remain editable while unsupported blocks stay preserved by the native Factory', async t => {
@@ -532,11 +532,11 @@ test('browser: image and file attachments remain editable while unsupported bloc
   );
   await page.locator('[data-attachment-type="image"]').waitFor();
   assert.equal(
-    await page.getByRole('button', { name: 'Edit message', exact: true }).getAttribute('aria-disabled'),
+    await page.getByRole('button', { name: 'Edit', exact: true }).getAttribute('aria-disabled'),
     null,
   );
   assert.equal(
-    await page.getByRole('button', { name: 'Regenerate from this message', exact: true }).getAttribute('aria-disabled'),
+    await page.getByRole('button', { name: 'Retry', exact: true }).getAttribute('aria-disabled'),
     null,
   );
   assert.deepEqual(await page.evaluate(() => fixture.factories.at(-1).content.attachments), [
@@ -551,11 +551,11 @@ test('browser: image and file attachments remain editable while unsupported bloc
     ]),
   );
   assert.equal(
-    await page.getByRole('button', { name: 'Edit message', exact: true }).getAttribute('aria-disabled'),
+    await page.getByRole('button', { name: 'Edit', exact: true }).getAttribute('aria-disabled'),
     'true',
   );
   assert.equal(
-    await page.getByRole('button', { name: 'Regenerate from this message', exact: true }).getAttribute('aria-disabled'),
+    await page.getByRole('button', { name: 'Retry', exact: true }).getAttribute('aria-disabled'),
     'true',
   );
   assert.deepEqual(await page.evaluate(() => fixture.factories.at(-1).content.extraBlocks), [
@@ -594,9 +594,9 @@ test('browser: the native primary keeps text, attachment, stop and busy-queue be
 test('browser: the native inline editor handles IME, newline, cancel and draft restoration', async t => {
   const { page, state } = await fixture(t);
   await page.getByTestId('native-draft').fill('Unsent composer draft');
-  const edit = page.getByRole('button', { name: 'Edit message', exact: true });
+  const edit = page.getByRole('button', { name: 'Edit', exact: true });
   await edit.click();
-  const field = page.getByRole('textbox', { name: 'Message text' });
+  const field = page.getByRole('textbox', { name: 'Message', exact: true });
   await field.fill('First line');
   await field.press('End');
   await field.press('Shift+Enter');
@@ -619,8 +619,8 @@ test('browser: failed inline edits retain their text and report the error beside
   const { page, state } = await fixture(t, {
     rejectExecute: { code: 'session-edit/host-error', message: 'Failed' },
   });
-  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
-  const field = page.getByRole('textbox', { name: 'Message text' });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const field = page.getByRole('textbox', { name: 'Message', exact: true });
   await field.fill('Keep this edited text');
   await page.getByTestId('execute-action').click();
   await page.getByTestId('session-edit-inline').getByRole('alert').waitFor();
@@ -635,12 +635,12 @@ test('browser: continuation failure stays at the composer and prompt fallback is
     rejectExecute: { code: 'session-edit/host-error', message: 'Failed' },
   });
   await page.getByTestId('session-edit-resume').click();
-  await page.locator('.dsh-se-composer-notice').getByText('The host could not complete the operation.').waitFor();
+  await page.locator('.dsh-se-composer-notice').getByText('Host error').waitFor();
   assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
   assert.deepEqual(await page.evaluate(() => fixture.navigation), []);
   state.rejectExecute = null;
-  await page.getByRole('button', { name: 'Continuation options' }).click();
-  await page.getByRole('menuitem', { name: 'Send continuation message' }).click();
+  await page.getByRole('button', { name: 'Continue options' }).click();
+  await page.getByRole('menuitem', { name: 'Send "continue"' }).click();
   await page.waitForFunction(() => fixture.session.running);
   assert.deepEqual(state.calls.filter(call => call.method === 'execute').map(call => call.input.continuationMode), ['no-message', 'prompt']);
 });
@@ -681,7 +681,7 @@ test('browser: completed sessions have neither a resume button nor a continuatio
   const { page } = await fixture(t, { continuationAvailable: false, canSendPrompt: false, reason: 'not-resumable' });
   await page.waitForFunction(() => fixture.inspectReplies > 0);
   assert.equal(await page.getByTestId('session-edit-resume').count(), 0);
-  assert.equal(await page.getByRole('button', { name: 'Continuation options' }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Continue options' }).count(), 0);
 });
 
 test('browser: a rewrite from another window reloads the existing conversation', async t => {

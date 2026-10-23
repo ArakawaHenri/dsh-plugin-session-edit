@@ -145,7 +145,6 @@ function mountUI(ctx, React, { createPortal }, ui) {
         }),
       ),
       h('div', { className: 'dsh-se-editor-actions' },
-        h('span', { className: 'dsh-se-muted' }, t('regenerateHint')),
         h(Button, { size: 'sm', onClick: cancel }, t(current.busy ? 'close' : 'cancel')),
         h(Button, {
           size: 'sm', variant: 'primary', icon: h(RetryIcon),

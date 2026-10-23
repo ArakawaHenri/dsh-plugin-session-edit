@@ -189,7 +189,7 @@ test('client waits for remote mount and releases its UI entries on unload', asyn
   mounted(f);
   assert.equal(
     f.slots.get('sidebar.workspaces.session.menu.item:dsh-session-edit.history').label(),
-    'Edit history / retry…',
+    'Message history…',
   );
   await f.root.dispose();
   assert.equal(f.slots.size, 0);
