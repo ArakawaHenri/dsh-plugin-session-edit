@@ -5,7 +5,7 @@ import {
   continuePromptText,
   continuationPolicy,
   foldInbox,
-  forkSeed,
+  rewriteSeed,
   planOperation,
   surfaceEvents,
 } from '../lib/plan.js';
@@ -82,7 +82,7 @@ function fixture() {
   };
   const request = {
     sessionId: 'source',
-    action: 'retry-fork',
+    action: 'retry',
     eventSeq: target.seq,
     messageId: target.data.id,
   };
@@ -97,33 +97,73 @@ function fixture() {
   return { events, push, target, snapshot, request, clearQueue };
 }
 
-test('edited branch excludes target and subsequent assistant, preserves parent, and cancels inherited queue', () => {
-  const { events, target } = fixture();
+test('history rewrite replaces the target, drops its suffix and cancels retained queues', () => {
+  const { events, target, snapshot, request } = fixture();
   const before = JSON.stringify(events);
-  const seed = forkSeed(events, target.seq, 10);
+  const plan = planOperation({ ...request, action: 'edit', replacementText: 'edited' }, snapshot);
+  const { events: seed } = rewriteSeed(snapshot, plan, human('edited', 'edited-id'), 10);
   assert.deepEqual(seed.slice(0, target.seq), events.slice(0, target.seq));
-  assert.ok(seed.some(e => e.type === 'turn/end' && e.data.reason.kind === 'forked'));
-  assert.equal(seed.some(e => e.type === 'user/message'), false);
+  assert.equal(seed[target.seq].data.content[0].text, 'edited');
+  assert.equal(seed.some(event => event.type === 'assistant/message'), false);
   assert.deepEqual(foldInbox(seed), { 'next-turn': [], 'next-step': [] });
-  assert.equal(seed.at(-1).data.outcome, 'canceled');
+  assert.equal(continuationPolicy(seed).available, true);
   assert.equal(JSON.stringify(events), before);
 });
 
-test('empty prefix is explicit, inherited, and contiguous', () => {
-  const seed = forkSeed(
-    [{ type: 'user/message', seq: 0, time: 1, data: human('first'), surfaceOp: 'append' }],
-    0,
-    10,
-  );
-  assert.deepEqual(seed, [{ type: 'session/end-seed', seq: 0, time: 10, data: { inherited: true } }]);
+test('seq-zero history remains contiguous and resumable after editing', () => {
+  const events = [{ type: 'user/message', seq: 0, time: 1, data: human('first'), surfaceOp: 'append' }];
+  const snapshot = { events, header: { id: 'source', isSeeded: false }, inheritedEventCount: 0 };
+  const seed = rewriteSeed(snapshot, { eventSeq: 0 }, human('edited', 'new-id'), 10);
+  assert.equal(seed.inheritedEventCount, 0);
+  assert.deepEqual(seed.events.map(event => event.seq), [0, 1, 2]);
+  assert.equal(seed.events[0].data.content[0].text, 'edited');
+  assert.equal(continuationPolicy(seed.events).available, true);
 });
 
-test('plan verifies message identity, rejects automatic context and attachments, and retains retry blocks', () => {
+test('plan verifies message identity, preserves image and file attachments on edit/retry, and rejects unsupported blocks', () => {
   const { snapshot, target, request } = fixture();
-  target.data.content.push({ type: 'text', text: 'second block' });
-  const plan = planOperation(request, snapshot);
-  assert.deepEqual(plan.content, target.data.content);
-  assert.notEqual(plan.content, target.data.content);
+  const imageBlock = {
+    type: 'image',
+    attachment: {
+      attachmentId: 'sha256:1111111111111111',
+      mediaType: 'image/png',
+      bytes: 128,
+      width: 16,
+      height: 16,
+      name: 'diagram.png',
+    },
+  };
+  const fileBlock = {
+    type: 'file',
+    attachment: {
+      attachmentId: 'sha256:2222222222222222',
+      name: 'notes.txt',
+      bytes: 42,
+    },
+  };
+  target.data.content = [imageBlock, ...target.data.content, { type: 'text', text: ' second block' }, fileBlock];
+  const retryPlan = planOperation(request, snapshot);
+  assert.deepEqual(retryPlan.content, target.data.content);
+  assert.notEqual(retryPlan.content, target.data.content);
+
+  const editPlan = planOperation(
+    { ...request, action: 'edit', replacementText: 'updated prompt' },
+    snapshot,
+  );
+  assert.deepEqual(editPlan.content, [
+    imageBlock,
+    { type: 'text', text: 'updated prompt' },
+    fileBlock,
+  ]);
+
+  // Attachment-only messages can be retried as-is or given text via edit.
+  target.data.content = [imageBlock];
+  assert.deepEqual(planOperation(request, snapshot).content, [imageBlock]);
+  assert.deepEqual(
+    planOperation({ ...request, action: 'edit', replacementText: 'added caption' }, snapshot).content,
+    [imageBlock, { type: 'text', text: 'added caption' }],
+  );
+
   assert.throws(
     () => planOperation({ ...request, messageId: 'another-message' }, snapshot),
     error => error.code === 'session-edit/session-changed',
@@ -136,7 +176,10 @@ test('plan verifies message identity, rejects automatic context and attachments,
   assert.throws(() => planOperation(request, snapshot), /human input/);
   target.data.source.kind = 'user';
   target.data.content.push({ type: 'image', image: 'fixture' });
-  assert.throws(() => planOperation(request, snapshot), /text-only/);
+  assert.throws(
+    () => planOperation(request, snapshot),
+    error => error.code === 'session-edit/message-not-editable',
+  );
 });
 
 test('continuation requires an unfinished turn and no pending queue', () => {
@@ -244,29 +287,28 @@ test('surface replacement position does not make an older replacement the conver
   assert.equal(surfaceEvents(events).at(-1).data.content[0].text, 'last');
 });
 
-test('branch plan uses the selected prefix route, not a model chosen later in the source', () => {
+test('regeneration retains the current model selection', () => {
   const { events, push } = log();
   push('request/header', { header: { config: { provider: 'first', model: 'old' } } });
   push('model/selection', { provider: 'selected', model: 'at-cut', reasoningEffort: 'high' });
   const target = push('user/message', human('retry me'), 'append');
   push('request/header', { header: { config: { provider: 'selected', model: 'at-cut' } } });
-  push('model/selection', { provider: 'later', model: 'not-in-branch' });
+  push('model/selection', { provider: 'later', model: 'current-model' });
   const snapshot = {
     events,
-    header: { id: 'source' },
+    header: { id: 'source', cwd: '/fixture' },
     ordinary: true,
     archived: false,
     status: 'idle',
   };
   const plan = planOperation(
-    { action: 'retry-fork', eventSeq: target.seq, messageId: target.data.id },
+    { action: 'retry', eventSeq: target.seq, messageId: target.data.id },
     snapshot,
     { defaultModel: { provider: 'default', model: 'fallback' } },
   );
   assert.deepEqual(plan.modelSelection, {
-    provider: 'selected',
-    model: 'at-cut',
-    reasoningEffort: 'high',
+    provider: 'later',
+    model: 'current-model',
   });
 });
 
@@ -325,4 +367,71 @@ test('a second-step inbox claim aborted before message admission is detected as 
   assert.equal(policy.available, false);
   assert.equal(policy.canSendPrompt, false);
   assert.equal(policy.reason, 'input-not-admitted');
+});
+
+test('adapter-defaulted reasoningEffort is not turned into an explicit model selection', () => {
+  const { events, push } = log();
+  const target = push('user/message', human('retry me'), 'append');
+  push('request/header', {
+    header: {
+      config: { provider: 'offline', model: 'stub', reasoningEffort: 'medium' },
+      adapterDefaults: { reasoningEffort: true },
+    },
+  });
+  const snapshot = {
+    events,
+    header: { id: 'source', cwd: '/fixture' },
+    ordinary: true,
+    archived: false,
+    status: 'idle',
+  };
+  const plan = planOperation(
+    { action: 'retry', eventSeq: target.seq, messageId: target.data.id },
+    snapshot,
+  );
+  assert.deepEqual(plan.modelSelection, { provider: 'offline', model: 'stub' });
+});
+
+test('rewriteSeed drops stale auto-titles on edit, preserves valid auto-titles on retry, and keeps plan/mode', () => {
+  const { events, push } = log();
+  const first = push('user/message', human('first prompt', 'u1'), 'append');
+  push('session/title', {
+    title: 'first prompt',
+    messageSeqs: [first.seq],
+    source: { kind: 'fallback' },
+  });
+  push('plan/mode', { enabled: true });
+  const snapshot = {
+    events,
+    header: { id: 'source', cwd: '/fixture', isSeeded: true },
+    inheritedEventCount: 1,
+    ordinary: true,
+    archived: false,
+    status: 'idle',
+  };
+
+  const editPlan = planOperation(
+    { action: 'edit', eventSeq: first.seq, messageId: first.data.id, replacementText: 'new prompt' },
+    snapshot,
+  );
+  const editedSeed = rewriteSeed(snapshot, editPlan, human('new prompt', 'u1-edit'), 10);
+  assert.equal(
+    editedSeed.events.some(event => event.type === 'session/title'),
+    false,
+  );
+  assert.deepEqual(
+    editedSeed.events.findLast(event => event.type === 'plan/mode')?.data,
+    { enabled: true },
+  );
+
+  const retryPlan = planOperation(
+    { action: 'retry', eventSeq: first.seq, messageId: first.data.id },
+    snapshot,
+  );
+  const retriedSeed = rewriteSeed(snapshot, retryPlan, human('first prompt', 'u1-retry'), 10);
+  assert.deepEqual(retriedSeed.events.findLast(event => event.type === 'session/title')?.data, {
+    title: 'first prompt',
+    messageSeqs: [retriedSeed.editedSeq],
+    source: { kind: 'fallback' },
+  });
 });

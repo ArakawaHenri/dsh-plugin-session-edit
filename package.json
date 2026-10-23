@@ -2,7 +2,7 @@
   "name": "dsh-session-edit",
   "version": "0.2.0",
   "type": "module",
-  "description": "Edit and retry historical DeepSeek Harness messages in branches, and continue stopped sessions",
+  "description": "Edit and regenerate historical DeepSeek Harness messages in place, and continue stopped sessions",
   "license": "MIT",
   "engines": {
     "node": ">=24",
@@ -63,8 +63,12 @@
     "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
     "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.2",
     "@deepseek-ai/dsh-brand": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-connection": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "@deepseek-ai/dsh-sandbox": "0.2.1-rc.2",
     "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
@@ -72,6 +76,7 @@
     "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-projection-cache": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-query": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-title": "0.2.1-rc.2",
     "@deepseek-ai/dsh-storage": "0.2.1-rc.2",
@@ -82,9 +87,12 @@
     "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2",
     "@deepseek-ai/dsh-util-values": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "3.18.5",
+    "clsx": "2.1.1",
     "esbuild": "^0.25.0",
+    "immer": "10.1.1",
     "playwright": "^1.56.0",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "zustand": "4.5.7"
   }
 }

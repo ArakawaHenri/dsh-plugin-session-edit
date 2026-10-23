@@ -12,6 +12,13 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import * as Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl';
 import Query from '@deepseek-ai/dsh-session-query';
+import Storage from '@deepseek-ai/dsh-storage';
+import * as JsonStorage from '@deepseek-ai/dsh-storage-json';
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain';
+import ProjectionCache from '@deepseek-ai/dsh-session-projection-cache';
+import { createRequire } from 'node:module';
+import { dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { SessionEditEngine } from '../../lib/service.js';
 import { HostAdapter } from '../../lib/host-adapter.js';
 
@@ -37,7 +44,11 @@ export const chunks = (value, reason = { kind: 'stop' }) => [
   { type: 'finish', reason },
 ];
 
-export async function createRuntime(t, config = {}) {
+const controllerRoot = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-api-session-controller'));
+const { ApiSessionAgentController } = await import(pathToFileURL(join(controllerRoot, 'types/agent.js')));
+const { installModelSelectionProjection } = await import(pathToFileURL(join(controllerRoot, 'types/model-selection-projection.js')));
+
+export async function createRuntime(t, config = {}, runtimeOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-service-runtime-'));
   const ctx = new Context();
   const requests = [];
@@ -76,7 +87,13 @@ export async function createRuntime(t, config = {}) {
   }
   new OfflineLlm();
 
-  await mount(Jsonl, { root: join(root, 'sessions'), compression: 'none' });
+  await mount(Jsonl, { root: join(root, 'sessions'), compression: runtimeOptions.compression ?? 'none' });
+  if (runtimeOptions.cache) {
+    new Storage(ctx);
+    await mount(JsonStorage, { root: join(root, 'storage') });
+    await mount(StorageDomain, { backend: 'json' });
+    await mount(ProjectionCache, { writeEveryEvents: 50, writeIntervalMs: 1000 });
+  }
   await mount(Query, {});
   const loopFiber = await mount(AgentLoop, { maxParallelToolCalls: 2 });
 
@@ -97,18 +114,10 @@ export async function createRuntime(t, config = {}) {
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ provider: 'offline', model: 'stub' }),
   });
-  ctx.provide('sessionController', {
-    async resolveAgent(id) {
-      const existing = ctx.agents.get(id);
-      if (existing) return { agent: existing };
-      const handle = await ctx.agents.resume({
-        resumeSessionId: id,
-        agentOptions: { provider: 'offline', model: 'stub' },
-      });
-      handles.push(handle);
-      return { agent: handle.agent };
-    },
-  });
+  ctx.provide('typert', { lookups: { configure() {} }, contexts: { configureHost() {} } });
+  installModelSelectionProjection(ctx);
+  const controller = new ApiSessionAgentController(ctx);
+  ctx.provide('sessionController', { resolveAgent: id => controller.resolveAgent(id) });
 
   const host = new HostAdapter(ctx);
   const engine = new SessionEditEngine(ctx, config, { host });
@@ -129,6 +138,7 @@ export async function createRuntime(t, config = {}) {
     handles,
     engine,
     host,
+    agentController: controller,
     setResponse(fn) {
       const previous = response;
       response = fn;
@@ -140,6 +150,7 @@ export async function createRuntime(t, config = {}) {
         sessionId: id,
         meta: { cwd: root, ...options.meta },
         ...(options.seed ? { seed: options.seed } : {}),
+        ...(options.inheritedEventCount === undefined ? {} : { inheritedEventCount: options.inheritedEventCount }),
         ...(options.parentAgent ? { parentAgent: options.parentAgent } : {}),
         agentOptions: { provider: 'offline', model: 'stub' },
       });

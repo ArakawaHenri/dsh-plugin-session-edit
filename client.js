@@ -54,7 +54,7 @@
         sessionId: expectString(value.sessionId, "sessionId"),
         action: value.action
       };
-      if (!["edit-fork", "retry-fork", "continue"].includes(value.action)) {
+      if (!["edit", "retry", "continue"].includes(value.action)) {
         throw new TypeError("Invalid action.");
       }
       if (value.action === "continue") {
@@ -80,7 +80,7 @@
         }
         output.eventSeq = expectSeq(value.eventSeq, "eventSeq");
         output.messageId = expectString(value.messageId, "messageId");
-        if (value.action === "edit-fork") {
+        if (value.action === "edit") {
           output.replacementText = expectString(value.replacementText, "replacementText", 131072);
         } else if (value.replacementText !== void 0) {
           throw new TypeError("Retry uses the original message content.");
@@ -103,7 +103,7 @@
       execute: {
         properties: {
           sessionId: idSchema,
-          action: { enum: ["edit-fork", "retry-fork", "continue"] },
+          action: { enum: ["edit", "retry", "continue"] },
           eventSeq: seqSchema,
           messageId: idSchema,
           replacementText: { type: "string", minLength: 1, maxLength: 131072 },
@@ -149,7 +149,7 @@
 
   // src/client-controller.js
   function createClientController(options) {
-    const { rpc, navigate, getLocale } = options;
+    const { rpc, navigate, getLocale, reloadSession } = options;
     const listeners = /* @__PURE__ */ new Set();
     const drafts = /* @__PURE__ */ new Map();
     const reads = /* @__PURE__ */ new Map();
@@ -171,7 +171,8 @@
     }
     const errorOf = (error) => ({
       code: typeof error?.code === "string" ? error.code : "session-edit/transport",
-      message: typeof error?.message === "string" ? error.message : String(error || "Request failed")
+      message: typeof error?.message === "string" ? error.message : String(error || "Request failed"),
+      ...error?.details ? { details: error.details } : {}
     });
     async function call(method, request) {
       let reply;
@@ -190,7 +191,7 @@
       return reply.value;
     }
     const actionKey = (sessionId, action, target) => JSON.stringify([sessionId, action, action === "continue" ? null : target]);
-    const draftKey = (sessionId, eventSeq) => JSON.stringify([sessionId, eventSeq]);
+    const draftKey = (sessionId, eventSeq, messageId) => JSON.stringify([sessionId, eventSeq, messageId]);
     function oneShot(key, work) {
       if (inFlight.has(key)) return inFlight.get(key);
       const task = Promise.resolve().then(work).finally(() => {
@@ -223,7 +224,7 @@
       publish({ panel: null });
     }
     async function openResult(result, guardEpoch = panelEpoch) {
-      const id = result?.childSessionId || result?.sourceSessionId;
+      const id = result?.sourceSessionId;
       if (!id) return;
       if (guardEpoch !== panelEpoch) {
         if (snapshot.panel) {
@@ -238,14 +239,21 @@
         return;
       }
       if (snapshot.panel) close();
+      const navigationEpoch = panelEpoch;
       try {
+        if (result.historyUpdated) {
+          await reloadSession?.(id);
+          await loadSession(id, true);
+        }
+        if (navigationEpoch !== panelEpoch || disposed) return;
         await navigate(id);
       } catch (error) {
         publish({
           notice: {
-            code: "session-edit/navigation-failed",
+            code: result.historyUpdated ? "session-edit/refresh-failed" : "session-edit/navigation-failed",
             message: errorOf(error).message,
-            sessionId: id
+            sessionId: id,
+            historyUpdated: result.historyUpdated
           }
         });
       }
@@ -341,6 +349,9 @@
         eventSeq: target.eventSeq
       });
       const message = value.messages.find((item) => item.eventSeq === target.eventSeq);
+      if (message && (target.text !== void 0 && target.text !== message.text || target.time !== void 0 && target.time !== message.time)) {
+        throw { code: "session-edit/session-changed", message: "The displayed message changed. Reload the conversation." };
+      }
       if (!message?.messageId || !message.editable) {
         throw {
           code: `session-edit/${message?.reason || "message-not-editable"}`,
@@ -350,16 +361,18 @@
       return { ...target, ...message, title: value.title || target.title };
     }
     async function openEdit(target) {
-      const key = draftKey(target.sessionId, target.eventSeq);
+      const key = draftKey(target.sessionId, target.eventSeq, target.messageId);
       const prior = snapshot.panel;
-      const historyState = prior?.view === "history" && prior.sessionId === target.sessionId ? {
-        title: prior.title,
-        messages: prior.messages,
-        nextBeforeSeq: prior.nextBeforeSeq
+      const history = prior?.view === "editor" ? prior.historyState : prior;
+      const historyState = history && prior.sessionId === target.sessionId && (prior.view === "history" || prior.placement === "history") ? {
+        title: history.title,
+        messages: history.messages,
+        nextBeforeSeq: history.nextBeforeSeq
       } : null;
       const epoch = newPanel(target.sessionId, {
         title: target.title || prior?.title || "",
         view: "editor",
+        placement: historyState ? "history" : "message",
         eventSeq: target.eventSeq,
         text: drafts.get(key) ?? target.text ?? "",
         loading: true,
@@ -370,7 +383,7 @@
         updatePanel(
           {
             messageId: message.messageId,
-            text: drafts.get(key) ?? message.text,
+            text: drafts.get(draftKey(target.sessionId, target.eventSeq, message.messageId)) ?? message.text,
             loading: false,
             title: message.title || target.title || ""
           },
@@ -393,8 +406,8 @@
     }
     function setText(text) {
       const current = snapshot.panel;
-      if (!current || current.busy || current.view !== "editor") return;
-      drafts.set(draftKey(current.sessionId, current.eventSeq), text);
+      if (!current || current.busy || current.loading || current.view !== "editor") return;
+      drafts.set(draftKey(current.sessionId, current.eventSeq, current.messageId), text);
       updatePanel({ text, error: null });
     }
     function submitEdit() {
@@ -402,7 +415,7 @@
       if (!current || current.view !== "editor" || current.busy || current.loading || !current.messageId || !current.text?.trim()) {
         return;
       }
-      const key = actionKey(current.sessionId, "edit-fork", current.eventSeq);
+      const key = actionKey(current.sessionId, "edit", current.eventSeq);
       if (inFlight.has(key)) return inFlight.get(key);
       const epoch = panelEpoch;
       updatePanel({ busy: true, error: null });
@@ -410,18 +423,31 @@
         try {
           const result = await call("execute", {
             sessionId: current.sessionId,
-            action: "edit-fork",
+            action: "edit",
             eventSeq: current.eventSeq,
             messageId: current.messageId,
             replacementText: current.text
           });
-          drafts.delete(draftKey(current.sessionId, current.eventSeq));
+          drafts.delete(draftKey(current.sessionId, current.eventSeq, current.messageId));
           if (disposed) return;
           await openResult(result, epoch);
         } catch (error) {
-          updatePanel({ busy: false, error: errorOf(error) }, epoch);
+          if (!await reportSavedFailure(current.sessionId, epoch, error)) {
+            updatePanel({ busy: false, error: errorOf(error) }, epoch);
+          }
         }
       });
+    }
+    async function reportSavedFailure(sessionId, epoch, error) {
+      if (!error?.details?.historyUpdated) return false;
+      if (disposed) return true;
+      if (epoch === panelEpoch && snapshot.panel?.sessionId === sessionId) close();
+      await reloadSession?.(sessionId).catch(() => {
+      });
+      await loadSession(sessionId, true).catch(() => {
+      });
+      publish({ notice: { ...errorOf(error), sessionId, historyUpdated: true } });
+      return true;
     }
     function reportActionError(sessionId, epoch, error) {
       const normalized = errorOf(error);
@@ -432,7 +458,7 @@
       }
     }
     function retryMessage(target) {
-      return oneShot(actionKey(target.sessionId, "retry-fork", target.eventSeq), async () => {
+      return oneShot(actionKey(target.sessionId, "retry", target.eventSeq), async () => {
         const epoch = panelEpoch;
         const inPanel = snapshot.panel?.sessionId === target.sessionId;
         if (inPanel) updatePanel({ busy: true, error: null }, epoch);
@@ -440,20 +466,22 @@
           const message = await resolveTarget(target);
           const result = await call("execute", {
             sessionId: target.sessionId,
-            action: "retry-fork",
+            action: "retry",
             eventSeq: message.eventSeq,
             messageId: message.messageId
           });
           if (disposed) return;
           await openResult(result, epoch);
         } catch (error) {
-          reportActionError(target.sessionId, epoch, error);
+          if (!await reportSavedFailure(target.sessionId, epoch, error)) {
+            reportActionError(target.sessionId, epoch, error);
+          }
         }
       });
     }
     function continueSession(sessionId, mode = "no-message") {
       return oneShot(actionKey(sessionId, "continue", mode), async () => {
-        const epoch = panelEpoch;
+        publish({ notice: null });
         try {
           const cached = snapshot.sessions[sessionId]?.value;
           const facts = cached ?? await loadSession(sessionId, true);
@@ -465,16 +493,17 @@
               message: facts.continuation.reason || "Continuation unavailable"
             };
           }
-          const result = await call("execute", {
+          await call("execute", {
             sessionId,
             action: "continue",
             continuationMode: mode,
             ...mode === "prompt" && getLocale ? { promptLocale: ["en", "zh"].includes(getLocale()) ? getLocale() : "zh" } : {}
           });
           if (disposed) return;
-          await openResult(result, epoch);
+          await loadSession(sessionId, true).catch(() => {
+          });
         } catch (error) {
-          reportActionError(sessionId, epoch, error);
+          publish({ notice: { ...errorOf(error), sessionId, action: "continue" } });
         }
       });
     }
@@ -494,6 +523,9 @@
       setText,
       submitEdit,
       openResult,
+      reportRefreshError(sessionId, error) {
+        publish({ notice: { ...errorOf(error), code: "session-edit/refresh-failed", sessionId, historyUpdated: true } });
+      },
       close,
       isBusy: (sessionId, action, target) => inFlight.has(actionKey(sessionId, action, target)),
       clearNotice() {
@@ -509,34 +541,107 @@
     };
   }
 
+  // src/native-composer.js
+  function useNativePrimary(React, marker, sessionId) {
+    const [anchor, setAnchor] = React.useState(null);
+    React.useLayoutEffect(() => {
+      const card = marker.current?.closest("[data-composer-card]");
+      if (!card) return;
+      const update = () => {
+        const button = [...card.querySelectorAll("button")].findLast(
+          (item) => !item.closest("[data-session-edit-control]") && item.parentElement.contains(marker.current)
+        );
+        const editor = card.querySelector("[contenteditable]");
+        const editable = editor?.getAttribute("contenteditable") === "true";
+        const next = button ? { button, parent: button.parentElement, className: button.className, editable, disabled: button.disabled } : null;
+        setAnchor(
+          (previous) => previous?.button === next?.button && previous?.parent === next?.parent && previous?.className === next?.className && previous?.editable === next?.editable && previous?.disabled === next?.disabled ? previous : next
+        );
+      };
+      update();
+      const observer = new MutationObserver(update);
+      observer.observe(card, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["disabled", "contenteditable", "class"]
+      });
+      return () => observer.disconnect();
+    }, [sessionId]);
+    return anchor;
+  }
+  function usePrimaryReplacement(React, anchor, active) {
+    React.useLayoutEffect(() => {
+      if (!active || !anchor) return;
+      anchor.button.setAttribute("data-session-edit-suppressed", "");
+      return () => anchor.button.removeAttribute("data-session-edit-suppressed");
+    }, [anchor?.button, active]);
+  }
+
+  // src/native-session.js
+  function createSessionReloader(sessions) {
+    const pending = /* @__PURE__ */ new Map();
+    return function reload(sessionId, summary) {
+      const existing = pending.get(sessionId);
+      if (existing) {
+        if (summary) {
+          existing.summary = summary;
+          existing.changed = true;
+        }
+        return existing.promise;
+      }
+      const entry = { summary, changed: false };
+      entry.promise = Promise.resolve().then(async () => {
+        do {
+          entry.changed = false;
+          const session = sessions.binding(sessionId)?.session;
+          if (!session) break;
+          const manager = sessions.manager;
+          if (typeof session.resync !== "function" || typeof session.projections?.clear !== "function" || !manager?.projectionStores) {
+            throw new Error("This DSH client cannot reload edited session history.");
+          }
+          manager.projectionInflight.get(sessionId)?.controller.abort();
+          manager.projectionInflight.delete(sessionId);
+          manager.projectionLoads.delete(sessionId);
+          session.projections.clear();
+          manager.projectionStores.set(sessionId, session.projections);
+          session.removed = false;
+          session.promptError = null;
+          session.lastAgentError = null;
+          if (entry.summary) manager.handleSessionAdded(entry.summary);
+          await session.resync();
+          if (session.getSnapshot().openState === "error") throw session.getSnapshot().openError;
+        } while (entry.changed);
+        await sessions.refresh();
+      }).finally(() => pending.delete(sessionId));
+      pending.set(sessionId, entry);
+      return entry.promise;
+    };
+  }
+
   // locale/en.json
   var en_default = {
     menu: "Edit history / retry\u2026",
     historyTitle: "Conversation history",
-    editTitle: "Edit and branch",
-    retryTitle: "Retry this message",
+    editTitle: "Edit message",
+    retryTitle: "Regenerate from this message",
     untitled: "Untitled conversation",
     close: "Close",
     cancel: "Cancel",
-    confirmEdit: "Edit and branch",
+    confirmEdit: "Save and regenerate",
     confirmContinue: "Continue task",
     confirmPrompt: "Send continuation message",
-    edit: "Edit",
-    retry: "Retry",
     copy: "Copy",
     copied: "Copied",
     copyFailed: "Could not copy",
     loading: "Loading\u2026",
     loadOlder: "Load earlier messages",
-    backToHistory: "Back to history",
     emptyHistory: "No user messages in this conversation.",
     textLabel: "Message text",
-    branchExplanation: "Creates a new branch from before this message and sends the updated text.",
     noMessageDescription: "Continue directly from the existing history without adding a user message.",
-    promptDescription: "Send a visible continuation prompt to the agent.",
     openConversation: "Open conversation",
-    navigationFailed: "The branch was created, but could not be opened automatically.",
-    plainTextOnly: "Editing and retrying currently support plain-text user messages.",
+    navigationFailed: "The history was updated, but the conversation could not be opened.",
+    plainTextOnly: "This message contains content blocks that cannot be edited or retried.",
     "error.forbidden": "Only the host owner can perform this action.",
     "error.unsupported-runtime": "This DSH version is not supported by the plugin.",
     "error.message-not-editable": "This message cannot be edited or retried.",
@@ -562,41 +667,43 @@
     "error.attachments-not-supported": "Messages with attachments cannot be edited or retried.",
     "error.message-too-large": "This message exceeds the maximum length limit.",
     "error.workspace-required": "This conversation has no recorded working directory.",
-    "error.workspace-missing": "The branch was created, but its workspace is no longer available.",
     "error.unsupported-format": "This conversation format is not supported.",
     "error.invalid-history": "The conversation history is inconsistent.",
     "error.host-error": "The host could not complete the operation.",
-    "error.closing": "Session Edit is unloading."
+    "error.closing": "Session Edit is unloading.",
+    stopped: "Stopped",
+    continueOptions: "Continuation options",
+    sending: "Sending\u2026",
+    refresh: "Refresh",
+    regenerateHint: "The conversation after this message will be regenerated.",
+    "error.unsupported-backend": "Editing history requires DSH JSONL session storage.",
+    "error.regeneration-failed": "History was updated, but regeneration could not be confirmed. Open this conversation to check its state.",
+    "error.refresh-failed": "History was updated, but this window could not reload it. Reopen the conversation."
   };
 
   // locale/zh.json
   var zh_default = {
     menu: "\u7F16\u8F91\u5386\u53F2\uFF0F\u91CD\u8BD5\u2026",
     historyTitle: "\u5BF9\u8BDD\u5386\u53F2",
-    editTitle: "\u7F16\u8F91\u5E76\u5206\u53C9",
-    retryTitle: "\u91CD\u8BD5\u6B64\u6D88\u606F",
+    editTitle: "\u7F16\u8F91\u6D88\u606F",
+    retryTitle: "\u4ECE\u6B64\u6D88\u606F\u91CD\u65B0\u751F\u6210",
     untitled: "\u672A\u547D\u540D\u4F1A\u8BDD",
     close: "\u5173\u95ED",
     cancel: "\u53D6\u6D88",
-    confirmEdit: "\u7F16\u8F91\u5E76\u5206\u53C9",
+    confirmEdit: "\u4FDD\u5B58\u5E76\u91CD\u65B0\u751F\u6210",
     confirmContinue: "\u7EE7\u7EED\u4EFB\u52A1",
     confirmPrompt: "\u53D1\u9001\u7EE7\u7EED\u6307\u4EE4",
-    edit: "\u7F16\u8F91",
-    retry: "\u91CD\u8BD5",
     copy: "\u590D\u5236",
     copied: "\u5DF2\u590D\u5236",
     copyFailed: "\u590D\u5236\u5931\u8D25",
     loading: "\u6B63\u5728\u52A0\u8F7D\u2026",
     loadOlder: "\u52A0\u8F7D\u66F4\u65E9\u7684\u6D88\u606F",
-    backToHistory: "\u8FD4\u56DE\u5386\u53F2\u5217\u8868",
     emptyHistory: "\u6B64\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u7528\u6237\u6D88\u606F\u3002",
     textLabel: "\u6D88\u606F\u6B63\u6587",
-    branchExplanation: "\u4FDD\u7559\u6B64\u6D88\u606F\u4E4B\u524D\u7684\u5386\u53F2\u5E76\u521B\u5EFA\u65B0\u5206\u652F\u53D1\u9001\u4FEE\u6539\u540E\u7684\u5185\u5BB9\u3002",
     noMessageDescription: "\u76F4\u63A5\u4F7F\u7528\u5DF2\u6709\u5386\u53F2\u7EE7\u7EED\uFF0C\u4E0D\u65B0\u589E\u7528\u6237\u6D88\u606F\u3002",
-    promptDescription: "\u53D1\u9001\u4E00\u6761\u53EF\u89C1\u7684\u201C\u7EE7\u7EED\u201D\u6307\u4EE4\u8BA9\u667A\u80FD\u4F53\u7EE7\u7EED\u3002",
     openConversation: "\u6253\u5F00\u4F1A\u8BDD",
-    navigationFailed: "\u64CD\u4F5C\u5DF2\u5B8C\u6210\uFF0C\u4F46\u65E0\u6CD5\u81EA\u52A8\u6253\u5F00\u5BF9\u5E94\u4F1A\u8BDD\u3002",
-    plainTextOnly: "\u7F16\u8F91\u548C\u91CD\u8BD5\u76EE\u524D\u4EC5\u652F\u6301\u7528\u6237\u53D1\u9001\u7684\u7EAF\u6587\u672C\u6D88\u606F\u3002",
+    navigationFailed: "\u5386\u53F2\u5DF2\u66F4\u65B0\uFF0C\u4F46\u672A\u80FD\u6253\u5F00\u5BF9\u5E94\u4F1A\u8BDD\u3002",
+    plainTextOnly: "\u6B64\u6D88\u606F\u5305\u542B\u6682\u4E0D\u652F\u6301\u7F16\u8F91\u6216\u91CD\u8BD5\u7684\u5185\u5BB9\u5757\u3002",
     "error.forbidden": "\u53EA\u6709\u4E3B\u673A\u6240\u6709\u8005\u53EF\u4EE5\u6267\u884C\u6B64\u64CD\u4F5C\u3002",
     "error.unsupported-runtime": "\u6B64\u63D2\u4EF6\u6682\u4E0D\u652F\u6301\u5F53\u524D DSH \u7248\u672C\u3002",
     "error.message-not-editable": "\u6B64\u6D88\u606F\u4E0D\u80FD\u7F16\u8F91\u6216\u91CD\u8BD5\u3002",
@@ -622,33 +729,40 @@
     "error.attachments-not-supported": "\u5305\u542B\u9644\u4EF6\u7684\u6D88\u606F\u6682\u4E0D\u652F\u6301\u7F16\u8F91\u6216\u91CD\u8BD5\u3002",
     "error.message-too-large": "\u6D88\u606F\u8D85\u51FA\u957F\u5EA6\u9650\u5236\u3002",
     "error.workspace-required": "\u6B64\u4F1A\u8BDD\u672A\u8BB0\u5F55\u5DE5\u4F5C\u76EE\u5F55\u3002",
-    "error.workspace-missing": "\u5206\u652F\u5DF2\u521B\u5EFA\uFF0C\u4F46\u5BF9\u5E94\u5DE5\u4F5C\u533A\u5DF2\u4E0D\u53EF\u7528\u3002",
     "error.unsupported-format": "\u6682\u4E0D\u652F\u6301\u6B64\u4F1A\u8BDD\u683C\u5F0F\u3002",
     "error.invalid-history": "\u5BF9\u8BDD\u5386\u53F2\u6570\u636E\u4E0D\u4E00\u81F4\u3002",
     "error.host-error": "\u4E3B\u673A\u672A\u80FD\u5B8C\u6210\u6B64\u64CD\u4F5C\u3002",
-    "error.closing": "Session Edit \u6B63\u5728\u5378\u8F7D\u3002"
+    "error.closing": "Session Edit \u6B63\u5728\u5378\u8F7D\u3002",
+    stopped: "\u5DF2\u505C\u6B62",
+    continueOptions: "\u7EE7\u7EED\u9009\u9879",
+    sending: "\u53D1\u9001\u4E2D\u2026",
+    refresh: "\u5237\u65B0",
+    regenerateHint: "\u6B64\u6D88\u606F\u4E4B\u540E\u7684\u5BF9\u8BDD\u5C06\u91CD\u65B0\u751F\u6210\u3002",
+    "error.unsupported-backend": "\u4FEE\u6539\u5386\u53F2\u9700\u8981 DSH \u7684 JSONL \u4F1A\u8BDD\u5B58\u50A8\u3002",
+    "error.regeneration-failed": "\u5386\u53F2\u5DF2\u66F4\u65B0\uFF0C\u4F46\u65E0\u6CD5\u786E\u8BA4\u91CD\u65B0\u751F\u6210\u7684\u72B6\u6001\u3002\u8BF7\u67E5\u770B\u5F53\u524D\u4F1A\u8BDD\u3002",
+    "error.refresh-failed": "\u5386\u53F2\u5DF2\u66F4\u65B0\uFF0C\u4F46\u5F53\u524D\u7A97\u53E3\u672A\u80FD\u91CD\u65B0\u52A0\u8F7D\u3002\u8BF7\u91CD\u65B0\u6253\u5F00\u4F1A\u8BDD\u3002"
   };
 
   // src/client.css
-  var client_default = ".dsh-se-row {\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  min-width: 0;\n}\n\n.dsh-se-row-actions {\n  display: flex;\n  align-items: center;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 4px;\n  color: var(--dsw-alias-label-tertiary);\n  font-size: 12px;\n}\n\n.dsh-se-row-actions time {\n  padding: 0 6px;\n}\n\n.dsh-se-action,\n.dsh-se-menu {\n  border: 0;\n  background: transparent;\n  color: var(--dsw-alias-label-secondary);\n  font: inherit;\n  cursor: pointer;\n  border-radius: var(--dsw-radius-sm, 6px);\n  padding: 5px 8px;\n}\n\n.dsh-se-action:hover:not(:disabled),\n.dsh-se-menu:hover {\n  background: var(--dsw-alias-interactive-bg-hover);\n}\n\n.dsh-se-action:focus-visible,\n.dsh-se-button:focus-visible,\n.dsh-se-menu:focus-visible {\n  outline: 2px solid var(--dsw-alias-state-business-primary, #5277df);\n  outline-offset: 2px;\n}\n\n.dsh-se-row-actions .dsh-se-action {\n  opacity: 0;\n}\n\n.dsh-se-row:hover .dsh-se-action,\n.dsh-se-row:focus-within .dsh-se-action {\n  opacity: 1;\n}\n\n.dsh-se-menu {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  width: 100%;\n  min-height: 34px;\n  text-align: left;\n  font-size: 13px;\n}\n\n.dsh-se-menu svg {\n  flex: none;\n}\n\n.dsh-se-dock {\n  display: flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 6px;\n  min-width: 0;\n  font-size: 12px;\n  color: var(--dsw-alias-label-secondary);\n}\n\n.dsh-se-dock .dsh-se-action {\n  border: 1px solid var(--dsw-alias-border-l3, #aaa3);\n}\n\n.dsh-se-dialog {\n  box-sizing: border-box;\n  width: min(640px, calc(100vw - 32px));\n  max-height: calc(100dvh - 64px);\n  padding: 0;\n  border: 1px solid var(--dsw-alias-border-l3, #aaa3);\n  border-radius: var(--dsw-radius-panel, 16px);\n  background: var(--dsw-alias-bg-layer-2, #fff);\n  color: var(--dsw-alias-label-primary, #222);\n  box-shadow: var(--dsw-elevation-prominent, 0 16px 60px #0004);\n  font: inherit;\n  overflow: hidden;\n}\n\n.dsh-se-dialog[open] {\n  display: flex;\n  flex-direction: column;\n}\n\n.dsh-se-dialog::backdrop {\n  background: var(--dsw-alias-bg-mask-1, #0006);\n  backdrop-filter: var(--dsw-mask-blur, blur(2px));\n}\n\n.dsh-se-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 20px 22px 12px;\n  border-bottom: 1px solid var(--dsw-alias-border-l4, #aaa2);\n}\n\n.dsh-se-title {\n  margin: 0;\n  font-size: 17px;\n  font-weight: 600;\n  line-height: 1.35;\n}\n\n.dsh-se-close {\n  font-size: 18px;\n  line-height: 1;\n}\n\n.dsh-se-content {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  padding: 16px 22px;\n  overflow: auto;\n  font-size: 14px;\n  line-height: 1.5;\n}\n\n.dsh-se-content p {\n  margin: 0;\n}\n\n.dsh-se-subtitle,\n.dsh-se-muted {\n  color: var(--dsw-alias-label-secondary, #666);\n  font-size: 13px;\n}\n\n.dsh-se-error {\n  padding: 10px 12px;\n  border-radius: var(--dsw-radius-md, 8px);\n  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #c23) 12%, transparent);\n  color: var(--dsw-alias-state-error-primary, #c23);\n}\n\n.dsh-se-textarea {\n  box-sizing: border-box;\n  width: 100%;\n  min-height: 180px;\n  resize: vertical;\n  padding: 12px;\n  border: 1px solid var(--dsw-alias-border-l2, #aaa6);\n  border-radius: var(--dsw-radius-md, 10px);\n  background: var(--dsw-alias-bg-layer-1, #fff);\n  color: inherit;\n  font: inherit;\n  line-height: 1.5;\n}\n\n.dsh-se-message-list {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n\n.dsh-se-message {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 12px;\n  border: 1px solid var(--dsw-alias-border-l3, #aaa3);\n  border-radius: var(--dsw-radius-md, 10px);\n}\n\n.dsh-se-message-meta {\n  display: flex;\n  justify-content: space-between;\n  gap: 8px;\n  font-size: 12px;\n  color: var(--dsw-alias-label-tertiary, #777);\n}\n\n.dsh-se-message-text {\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  max-height: 160px;\n  overflow: auto;\n}\n\n.dsh-se-message-actions,\n.dsh-se-footer {\n  display: flex;\n  align-items: center;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n}\n\n.dsh-se-footer {\n  padding: 12px 22px 18px;\n  border-top: 1px solid var(--dsw-alias-border-l4, #aaa2);\n}\n\n.dsh-se-button {\n  height: 34px;\n  padding: 0 13px;\n  border: 1px solid var(--dsw-alias-border-l2, #aaa6);\n  border-radius: var(--dsw-radius-md, 8px);\n  background: transparent;\n  color: inherit;\n  font: inherit;\n  font-size: 13px;\n  cursor: pointer;\n}\n\n.dsh-se-button.dsh-se-primary {\n  background: var(--dsw-alias-label-primary, #222);\n  color: var(--dsw-alias-bg-layer-1, #fff);\n  border-color: transparent;\n}\n\n.dsh-se-dialog button:disabled,\n.dsh-se-action:disabled {\n  opacity: 0.42;\n  cursor: not-allowed;\n}\n\n.dsh-se-notice {\n  position: fixed;\n  right: 18px;\n  bottom: 18px;\n  z-index: 9999;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  max-width: min(460px, calc(100vw - 36px));\n  padding: 12px 14px;\n  border: 1px solid var(--dsw-alias-border-l2, #aaa6);\n  border-radius: var(--dsw-radius-md, 10px);\n  background: var(--dsw-alias-bg-layer-2, #fff);\n  color: var(--dsw-alias-label-primary, #222);\n  box-shadow: var(--dsw-elevation-prominent, 0 16px 60px #0004);\n  font-size: 13px;\n}\n\n.dsh-se-notice p {\n  margin: 0;\n}\n\n@media (hover: none), (max-width: 720px) {\n  .dsh-se-row-actions .dsh-se-action {\n    opacity: 1;\n  }\n}\n";
+  var client_default = ".dsh-se-row {\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  min-width: 0;\n}\n\n.dsh-se-row-actions,\n.dsh-se-editor-actions {\n  display: flex;\n  align-items: center;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 4px;\n}\n\n.dsh-se-row-actions {\n  color: var(--dsw-alias-label-tertiary);\n  font-size: 12px;\n}\n\n.dsh-se-row-actions time { margin-right: 6px; }\n\n.dsh-se-action {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 28px;\n  height: 28px;\n  padding: 0;\n  border: 0;\n  border-radius: var(--dsw-radius-sm);\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary);\n  cursor: pointer;\n}\n\n.dsh-se-action:hover:not(:disabled) {\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n}\n\n.dsh-se-action:disabled,\n.dsh-se-action[aria-disabled='true'] { opacity: .4; cursor: default; }\n\n.dsh-se-row > .dsh-se-row-actions { opacity: 0; }\n.dsh-se-row:hover > .dsh-se-row-actions,\n.dsh-se-row:focus-within > .dsh-se-row-actions { opacity: 1; }\n\n.dsh-se-editor { width: 100%; min-width: 0; }\n.dsh-se-editor-field { display: flex; border: 0; padding: 0; margin: 0; min-width: 0; }\n.dsh-se-editor-input {\n  width: 100%;\n  min-height: 72px;\n  max-height: 320px;\n  padding: 10px 12px;\n  font-family: var(--dsw-font-family);\n  font-size: var(--dsh-content-font-size, 14px);\n  line-height: calc(24px + var(--dsh-content-font-delta, 0px));\n}\n.dsh-se-editor-actions { gap: 8px; margin-top: 8px; }\n.dsh-se-editor-actions > .dsh-se-muted { margin-right: auto; }\n\n.dsh-se-error { color: var(--dsw-alias-state-error-primary); margin: 0 0 8px; font-size: 13px; }\n.dsh-se-muted { color: var(--dsw-alias-label-secondary); margin: 0; font-size: 13px; }\n\n[data-session-edit-suppressed] { display: none !important; }\n.dsh-se-primary-seat { display: inline-flex; flex: none; }\n/* Used only if a host replaces the InputBar and no native primary can be found. */\n.dsh-se-primary {\n  display: grid;\n  place-items: center;\n  width: 34px;\n  height: 34px;\n  border: 0;\n  border-radius: 999px;\n  background: var(--dsw-alias-button-info-fill);\n  color: var(--dsw-alias-label-primary-foreground);\n  cursor: pointer;\n}\n.dsh-se-primary:disabled { opacity: .4; cursor: default; }\n.dsh-se-status { display: inline-flex; align-items: center; gap: 2px; color: var(--dsw-alias-label-tertiary); font-size: 12px; }\n.dsh-se-status .dsh-se-action { width: 24px; height: 24px; }\n\n.dsh-se-composer-notice {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 8px;\n  margin: 0 auto 6px;\n  padding: 6px 10px;\n  width: 100%;\n  max-width: var(--dsh-composer-card-max-width);\n  border-radius: var(--dsw-radius-md);\n  background: var(--dsw-alias-interactive-bg-hover);\n  color: var(--dsw-alias-label-secondary);\n  font-size: 13px;\n}\n.dsh-se-composer-notice > svg { flex: none; }\n.dsh-se-composer-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }\n\n.dsh-se-history-modal { width: min(640px, calc(100vw - 32px)); }\n.dsh-se-message-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }\n.dsh-se-message { min-width: 0; padding-bottom: 12px; border-bottom: .5px solid var(--dsw-alias-border-l4); }\n.dsh-se-message:last-child { border-bottom: 0; }\n.dsh-se-message-text { margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }\n\n@media (hover: none), (max-width: 720px) {\n  .dsh-se-row > .dsh-se-row-actions { opacity: 1; }\n}\n@media (pointer: coarse) {\n  .dsh-se-action, .dsh-se-status .dsh-se-action { min-width: 36px; min-height: 36px; }\n}\n";
 
   // src/client.entry.js
   var dictionaries = { en: en_default, zh: zh_default };
   var namespace = "dsh.sessionEdit";
+  function isObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
   function prepareContent(content, data = {}) {
     const texts = [];
     const attachments = [];
     const extraBlocks = [];
     for (const block of content || []) {
-      if (block.type === "text" && typeof block.text === "string") {
-        texts.push(block.text);
-      } else if (block.type === "image" && block.attachment !== void 0) {
+      if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
+      else if (block.type === "image" && isObject(block.attachment)) {
         attachments.push({ type: "image", image: { attachment: block.attachment } });
-      } else if (block.type === "file" && block.attachment !== void 0) {
+      } else if (block.type === "file" && isObject(block.attachment)) {
         attachments.push({ type: "file", file: block.attachment });
-      } else {
-        extraBlocks.push(block);
-      }
+      } else extraBlocks.push(block);
     }
     return {
       text: texts.join(""),
@@ -657,42 +771,53 @@
       ...data.referenceLabels === void 0 ? {} : { referenceLabels: data.referenceLabels }
     };
   }
-  function editIcon(h) {
-    return h(
-      "svg",
-      {
-        width: 15,
-        height: 15,
-        viewBox: "0 0 16 16",
-        fill: "none",
-        stroke: "currentColor",
-        strokeWidth: 1.25,
-        strokeLinecap: "round",
-        strokeLinejoin: "round",
-        "aria-hidden": true
-      },
-      h("path", { d: "M3 11.5V14h2.5L14 5.5 10.5 2 3 9.5M9.5 3l3.5 3.5" })
-    );
-  }
   function clock(time) {
     if (!Number.isFinite(time)) return "";
-    return new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const date = new Date(time);
+    return date.toDateString() === (/* @__PURE__ */ new Date()).toDateString() ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   }
-  function mountUI(ctx, React) {
+  function mountUI(ctx, React, { createPortal }, ui) {
     const h = React.createElement;
+    const {
+      Button,
+      InlineEditor,
+      Menu,
+      MenuItemButton,
+      Modal,
+      Toast,
+      Tooltip,
+      writeClipboard,
+      IconEditOutlineRegular: EditIcon,
+      IconRefreshOutlineRegular: RetryIcon,
+      IconCopyOutlineRegular: CopyIcon,
+      IconCheckOutlineRegular: CheckIcon,
+      IconTriangleRightFillRegular: PlayIcon,
+      IconEllipsisOutlineRegular: MoreIcon,
+      IconWarningOutlineRegular: WarningIcon
+    } = ui;
     ctx.effect(() => ctx.locale.register(namespace, dictionaries));
     const translate = ctx.locale.bind(namespace);
+    const reloadSession = createSessionReloader(ctx.sessions);
     const controller = createClientController({
       rpc: ctx.remote.sessionEdit,
       navigate: (id) => ctx.uiWorkspace.openSession(id),
-      getLocale: () => ctx.locale.getSnapshot()
+      getLocale: () => ctx.locale.getSnapshot(),
+      reloadSession
     });
     ctx.effect(() => () => controller.dispose());
+    ctx.effect(() => ctx.remote.$on("api-session/added", (summary) => {
+      const session = ctx.sessions.binding(summary.sessionId)?.session;
+      if (session?.getSnapshot().removed) {
+        void reloadSession(summary.sessionId, summary).then(() => {
+          if (controller.getSnapshot().sessions[summary.sessionId]) {
+            return controller.loadSession(summary.sessionId, true).catch(() => {
+            });
+          }
+        }).catch((error) => controller.reportRefreshError(summary.sessionId, error));
+      }
+    }));
     function useTranslation() {
-      React.useSyncExternalStore(
-        (listener) => ctx.locale.subscribe(listener),
-        () => ctx.locale.getSnapshot()
-      );
+      React.useSyncExternalStore((listener) => ctx.locale.subscribe(listener), () => ctx.locale.getSnapshot());
       return translate;
     }
     function useState(selector) {
@@ -703,403 +828,369 @@
     }
     function explain(error, t) {
       const code = String(error?.code || error || "").split("/").at(-1);
-      const key = `error.${code}`;
+      const key = "error." + code;
       return Object.hasOwn(dictionaries.en, key) ? t(key) : typeof error === "string" ? error : error?.message || t("error.generic");
     }
-    function button(label, onClick, options = {}) {
+    function canExecute(props) {
+      return typeof props.useRemoteAccess === "function" && props.useRemoteAccess("sessionEdit/execute");
+    }
+    function action(label, Icon, onClick, { unavailable = false, busy = false, hint = label } = {}) {
       return h(
-        "button",
-        {
+        Tooltip,
+        { label: hint, side: "bottom", portal: true },
+        h("button", {
           type: "button",
-          className: `dsh-se-button${options.primary ? " dsh-se-primary" : ""}`,
-          disabled: options.disabled,
-          onClick,
-          ...options.testId ? { "data-testid": options.testId } : {}
-        },
-        label
+          className: "dsh-se-action",
+          "aria-label": label,
+          "aria-disabled": unavailable || busy || void 0,
+          disabled: busy,
+          onClick: unavailable || busy ? void 0 : onClick
+        }, h(Icon, { size: 16 }))
       );
     }
-    function canExecute(props) {
-      return typeof props.useRemoteAccess === "function" ? props.useRemoteAccess("sessionEdit/execute") : false;
-    }
-    function MenuItem(props) {
+    function HistoryMenu(props) {
       const t = useTranslation();
       const allowed = canExecute(props);
       const [, setOpen] = props.useMenuOpenState();
       if (!allowed) return null;
+      return h(MenuItemButton, {
+        icon: h(EditIcon),
+        onSelect: () => {
+          setOpen(false);
+          void controller.openHistory(props.sessionId, props.displayTitle || t("untitled"));
+        }
+      }, t("menu"));
+    }
+    function MessageEditor({ current }) {
+      const t = useTranslation();
+      const ref = React.useRef(null);
+      React.useEffect(() => {
+        if (!current.loading) ref.current?.querySelector("textarea")?.focus();
+      }, [current.eventSeq, current.loading]);
+      const cancel = () => current.placement === "history" && !current.busy ? controller.backToHistory() : controller.close();
       return h(
-        "button",
+        "div",
         {
-          type: "button",
-          role: "menuitem",
-          className: "dsh-se-menu",
-          "data-testid": "session-edit-menu",
-          onClick: (event) => {
-            event.stopPropagation();
-            setOpen(false);
-            void controller.openHistory(props.sessionId, props.displayTitle || t("untitled"));
+          className: "dsh-se-editor",
+          ref,
+          "data-testid": "session-edit-inline",
+          onKeyDown: (event) => {
+            if (event.key === "Escape") event.stopPropagation();
           }
         },
-        editIcon(h),
-        t("menu")
+        current.error && h("p", { className: "dsh-se-error", role: "alert" }, explain(current.error, t)),
+        current.loading && h("p", { className: "dsh-se-muted", role: "status" }, t("loading")),
+        h(
+          "fieldset",
+          { className: "dsh-se-editor-field", disabled: current.busy || current.loading },
+          h(InlineEditor, {
+            value: current.text,
+            label: t("textLabel"),
+            className: "dsh-se-editor-input",
+            onChange: controller.setText,
+            onSave: () => void controller.submitEdit(),
+            onCancel: cancel
+          })
+        ),
+        h(
+          "div",
+          { className: "dsh-se-editor-actions" },
+          h("span", { className: "dsh-se-muted" }, t("regenerateHint")),
+          h(Button, { size: "sm", onClick: cancel }, t(current.busy ? "close" : "cancel")),
+          h(Button, {
+            size: "sm",
+            variant: "primary",
+            icon: h(RetryIcon),
+            disabled: current.busy || current.loading || !current.messageId || !current.text?.trim(),
+            onClick: () => void controller.submitEdit(),
+            "data-testid": "execute-action"
+          }, t(current.busy ? "sending" : "confirmEdit"))
+        )
       );
     }
     function UserMessage(props) {
       const t = useTranslation();
       const allowed = canExecute(props);
       const data = props.node.data;
-      const textOnly = Array.isArray(data.content) && data.content.length > 0 && data.content.every((block) => block.type === "text");
-      const busyEdit = useState(
-        () => controller.isBusy(props.sessionId, "edit-fork", data.seq) ? 1 : 0
-      );
-      const busyRetry = useState(
-        () => controller.isBusy(props.sessionId, "retry-fork", data.seq) ? 1 : 0
-      );
-      const ordinary = useState((state) => state.sessions[props.sessionId]?.value?.ordinary);
-      const messageLimit = useState((state) => state.sessions[props.sessionId]?.value?.maxTextChars);
+      const state = useState();
+      const current = state.panel;
+      const editing = current?.view === "editor" && current.placement === "message" && current.sessionId === props.sessionId && current.eventSeq === data.seq;
+      React.useEffect(() => () => {
+        const panel = controller.getSnapshot().panel;
+        if (panel?.placement === "message" && panel.sessionId === props.sessionId && panel.eventSeq === data.seq) {
+          controller.close();
+        }
+      }, [props.sessionId, data.seq]);
       const [copyState, setCopyState] = React.useState(null);
       const copyTimer = React.useRef(null);
       React.useEffect(() => () => clearTimeout(copyTimer.current), []);
-      const prepared = React.useMemo(
-        () => prepareContent(data.content, data),
-        [data.content, data.referenceLabels]
-      );
-      const facts = React.useMemo(
-        () => ({
-          ...data.referenceLabels === void 0 ? {} : { sessionLabels: data.referenceLabels },
-          ...data.skillNames === void 0 ? {} : { skillNames: data.skillNames }
-        }),
-        [data.referenceLabels, data.skillNames]
-      );
-      const owned = ordinary === false;
-      const tooLong = textOnly && typeof messageLimit === "number" && prepared.text.length > messageLimit;
-      const editable = data.source?.kind === "user" && Number.isSafeInteger(data.seq) && data.seq >= 0 && textOnly && !owned && !tooLong;
-      const disabledReason = owned ? t("error.owned-session") : tooLong ? t("error.message-too-large") : !textOnly ? t("plainTextOnly") : null;
+      const prepared = React.useMemo(() => prepareContent(data.content, data), [data.content, data.referenceLabels]);
+      const facts = React.useMemo(() => ({
+        ...data.referenceLabels === void 0 ? {} : { sessionLabels: data.referenceLabels },
+        ...data.skillNames === void 0 ? {} : { skillNames: data.skillNames }
+      }), [data.referenceLabels, data.skillNames]);
+      const supported = Array.isArray(data.content) && data.content.length > 0 && prepared.extraBlocks.length === 0 && (Boolean(prepared.text.trim()) || prepared.attachments.length > 0);
+      const session = state.sessions[props.sessionId]?.value;
+      const owned = session?.ordinary === false;
+      const archived = session?.archived === true;
+      const tooLong = supported && prepared.text.length > (session?.maxTextChars ?? 131072);
+      const editable = data.source?.kind === "user" && Number.isSafeInteger(data.seq) && data.seq >= 0 && supported && !owned && !archived && !tooLong;
+      const reason = owned ? t("error.owned-session") : archived ? t("error.archived") : tooLong ? t("error.message-too-large") : t("plainTextOnly");
       const target = {
         sessionId: props.sessionId,
         eventSeq: data.seq,
         messageId: data.messageId,
-        text: prepared.text
+        text: prepared.text,
+        time: data.time
       };
       const copy = async () => {
-        try {
-          await navigator.clipboard.writeText(prepared.text);
-          setCopyState("copied");
-        } catch {
-          setCopyState("copyFailed");
-        }
+        const copied = await writeClipboard(prepared.text).catch(() => false);
+        setCopyState(copied ? "copied" : "copyFailed");
         clearTimeout(copyTimer.current);
         copyTimer.current = setTimeout(() => setCopyState(null), 1500);
       };
       return h(
         "div",
         { className: "dsh-se-row", "data-session-edit-message": data.seq },
-        props.renderFactorySlot("conversation.chat.user.content", {
+        editing ? h(
+          React.Fragment,
+          null,
+          prepared.attachments.length > 0 && props.renderFactorySlot("conversation.chat.user.content", {
+            content: { ...prepared, text: "" },
+            loadImage: props.loadImage,
+            facts,
+            interactive: false
+          }),
+          h(MessageEditor, { current })
+        ) : props.renderFactorySlot("conversation.chat.user.content", {
           content: prepared,
           loadImage: props.loadImage,
           facts,
           interactive: true
         }),
-        h(
+        !editing && h(
           "div",
           { className: "dsh-se-row-actions" },
           Number.isFinite(data.time) && h("time", { dateTime: new Date(data.time).toISOString() }, clock(data.time)),
-          h(
-            "button",
-            { type: "button", className: "dsh-se-action", "aria-label": t("copy"), onClick: copy },
-            t(copyState || "copy")
-          ),
-          allowed && h(
-            "button",
-            {
-              type: "button",
-              className: "dsh-se-action",
-              disabled: !editable || busyEdit,
-              title: !editable ? disabledReason : t("editTitle"),
-              "aria-label": t("editTitle"),
-              onClick: () => void controller.openEdit(target)
-            },
-            t("edit")
-          ),
-          allowed && h(
-            "button",
-            {
-              type: "button",
-              className: "dsh-se-action",
-              disabled: !editable || busyRetry,
-              title: !editable ? disabledReason : t("retryTitle"),
-              "aria-label": t("retryTitle"),
-              onClick: () => void controller.retryMessage(target)
-            },
-            t("retry")
-          )
+          action(t(copyState || "copy"), copyState === "copied" ? CheckIcon : CopyIcon, () => void copy()),
+          allowed && action(t("editTitle"), EditIcon, () => void controller.openEdit(target), {
+            unavailable: !editable,
+            hint: editable ? t("editTitle") : reason,
+            busy: controller.isBusy(props.sessionId, "edit", data.seq)
+          }),
+          allowed && action(t("retryTitle"), RetryIcon, () => void controller.retryMessage(target), {
+            unavailable: !editable,
+            hint: editable ? t("retryTitle") : reason,
+            busy: controller.isBusy(props.sessionId, "retry", data.seq)
+          })
         )
       );
     }
-    function ContinueDock(props) {
+    function ComposerContinue(props) {
       const t = useTranslation();
       const allowed = canExecute(props);
-      const running = props.useSession((snapshot) => snapshot.running);
-      const openState = props.useSession((snapshot) => snapshot.openState);
-      const entry = useState((state) => state.sessions[props.sessionId]);
+      const running = props.useSession((s) => s.running);
+      const openState = props.useSession((s) => s.openState);
+      const removed = props.useSession((s) => s.removed);
+      const input = props.useInput((s) => s);
+      const entry = useState((s) => s.sessions[props.sessionId]);
+      const busy = useState(() => controller.isBusy(props.sessionId, "continue"));
+      const marker = React.useRef(null);
+      const anchor = useNativePrimary(React, marker, props.sessionId);
       React.useEffect(() => {
-        if (allowed && props.sessionId && !running) {
-          void controller.loadSession(props.sessionId, true).catch(() => {
-          });
-        }
+        if (allowed && props.sessionId && !running) void controller.loadSession(props.sessionId, true).catch(() => {
+        });
       }, [props.sessionId, allowed, running, openState]);
-      if (!allowed || running) return null;
       const facts = entry?.value;
-      if (!facts?.ordinary || facts.archived || facts.status === "running") return null;
-      if (!facts.continuation.available && !facts.continuation.canSendPrompt) return null;
-      const direct = facts.continuation.available;
-      const busy = controller.isBusy(props.sessionId, "continue");
-      return h(
-        "div",
-        { className: "dsh-se-dock", "data-testid": "session-edit-continue" },
-        h(
-          "button",
-          {
-            type: "button",
-            className: "dsh-se-action",
-            disabled: !direct || entry.loading || busy,
-            title: direct ? t("noMessageDescription") : explain(facts.continuation.reason || "continuation-unsupported", t),
-            onClick: () => void controller.continueSession(props.sessionId)
-          },
-          t("confirmContinue")
-        ),
-        facts.continuation.canSendPrompt && h(
-          "button",
-          {
-            type: "button",
-            className: "dsh-se-action",
-            disabled: entry.loading || busy,
-            title: t("promptDescription"),
-            onClick: () => void controller.continueSession(props.sessionId, "prompt")
-          },
-          t("confirmPrompt")
-        )
+      const available = allowed && !removed && !running && input?.phase === "plain" && !input.draft.trim() && input.attachmentIds.length === 0 && input.queue.length === 0 && facts?.ordinary && !facts.archived && facts.status !== "running" && facts.continuation.available;
+      const replace = Boolean(available && anchor?.editable && anchor.disabled);
+      usePrimaryReplacement(React, anchor, replace);
+      const button = h(
+        Tooltip,
+        { label: t("noMessageDescription"), side: "top", portal: true },
+        h("button", {
+          type: "button",
+          className: anchor?.className || "dsh-se-primary",
+          "aria-label": t("confirmContinue"),
+          "data-testid": "session-edit-resume",
+          disabled: busy || entry?.loading,
+          onMouseDown: (event) => event.preventDefault(),
+          onClick: () => void controller.continueSession(props.sessionId)
+        }, h(PlayIcon, { size: 20 }))
       );
-    }
-    function History({ current, t }) {
       return h(
         React.Fragment,
         null,
-        current.nextBeforeSeq !== null && button(
-          t(current.loading ? "loading" : "loadOlder"),
-          () => void controller.loadOlder(),
-          { disabled: current.loading, testId: "load-older" }
-        ),
-        !current.loading && !current.messages.length && h("p", { className: "dsh-se-subtitle" }, t("emptyHistory")),
-        h(
-          "ol",
-          { className: "dsh-se-message-list" },
-          ...current.messages.map(
-            (message) => h(
-              "li",
-              {
-                key: message.messageId || message.eventSeq,
-                className: "dsh-se-message",
-                "data-event-seq": message.eventSeq
-              },
+        h("span", { ref: marker, hidden: true, "data-session-edit-control": true }),
+        replace && createPortal(h("span", { className: "dsh-se-primary-seat", "data-session-edit-control": true }, button), anchor.parent),
+        available && !anchor && h("span", { "data-session-edit-control": true }, button)
+      );
+    }
+    function ContinueStatus(props) {
+      const t = useTranslation();
+      const allowed = canExecute(props);
+      const running = props.useSession((s) => s.running);
+      const entry = useState((s) => s.sessions[props.sessionId]);
+      const busy = useState(() => controller.isBusy(props.sessionId, "continue"));
+      const [open, setOpen] = React.useState(false);
+      React.useEffect(() => setOpen(false), [props.sessionId, running]);
+      const facts = entry?.value;
+      if (!allowed || running || !facts?.ordinary || facts.archived || facts.status === "running" || !facts.continuation.available && !facts.continuation.canSendPrompt) return null;
+      return h(
+        "div",
+        { className: "dsh-se-status", "data-testid": "session-edit-continue" },
+        h("span", null, t("stopped")),
+        h(Menu, {
+          open,
+          onClose: () => setOpen(false),
+          portal: true,
+          side: "top",
+          align: "end",
+          compact: true,
+          anchor: h(
+            Tooltip,
+            { label: t("continueOptions"), side: "top" },
+            h("button", {
+              type: "button",
+              className: "dsh-se-action",
+              "aria-label": t("continueOptions"),
+              "aria-expanded": open,
+              "aria-haspopup": "menu",
+              disabled: busy || entry.loading,
+              onClick: () => setOpen((value) => !value)
+            }, h(MoreIcon))
+          ),
+          items: [
+            ...!facts.continuation.available ? [{ type: "label", id: "reason", text: explain(facts.continuation.reason, t) }] : [],
+            { id: "prompt", label: t("confirmPrompt"), disabled: !facts.continuation.canSendPrompt }
+          ],
+          onSelect: () => {
+            setOpen(false);
+            void controller.continueSession(props.sessionId, "prompt");
+          }
+        })
+      );
+    }
+    function ComposerNotice(props) {
+      const t = useTranslation();
+      const state = useState();
+      const entry = state.sessions[props.sessionId];
+      const notice = state.notice?.action === "continue" && state.notice.sessionId === props.sessionId ? state.notice : null;
+      const error = notice || entry?.error;
+      if (!error) return null;
+      return h(
+        "div",
+        { className: "dsh-se-composer-notice", role: "alert" },
+        h(WarningIcon),
+        h("span", null, explain(error, t)),
+        notice ? h(Button, { size: "sm", onClick: controller.clearNotice }, t("close")) : h(Button, {
+          size: "sm",
+          disabled: entry.loading,
+          onClick: () => void controller.loadSession(props.sessionId, true).catch(() => {
+          })
+        }, t("refresh"))
+      );
+    }
+    function History({ current }) {
+      const t = useTranslation();
+      const history = current.view === "editor" ? current.historyState : current;
+      return h(
+        React.Fragment,
+        null,
+        current.error && current.view === "history" && h("p", { className: "dsh-se-error", role: "alert" }, explain(current.error, t)),
+        current.loading && !history.messages.length && h("p", { className: "dsh-se-muted", role: "status" }, t("loading")),
+        history.nextBeforeSeq !== null && h(Button, {
+          size: "sm",
+          disabled: current.loading || current.view === "editor",
+          onClick: () => void controller.loadOlder(),
+          "data-testid": "load-older"
+        }, t(current.loading ? "loading" : "loadOlder")),
+        !current.loading && !history.messages.length && h("p", { className: "dsh-se-muted" }, t("emptyHistory")),
+        h("ol", { className: "dsh-se-message-list" }, ...history.messages.map(
+          (message) => h(
+            "li",
+            { key: message.messageId || message.eventSeq, className: "dsh-se-message", "data-event-seq": message.eventSeq },
+            current.view === "editor" && current.eventSeq === message.eventSeq ? h(MessageEditor, { current }) : h(
+              React.Fragment,
+              null,
               h(
-                "div",
-                { className: "dsh-se-message-meta" },
-                h(
-                  "time",
-                  { dateTime: new Date(message.time).toISOString() },
-                  new Date(message.time).toLocaleString()
-                )
-              ),
-              h("p", { className: "dsh-se-message-text" }, message.text),
-              !message.editable && h(
                 "p",
-                { className: "dsh-se-muted" },
-                message.reason ? explain(message.reason, t) : t("plainTextOnly")
+                { className: "dsh-se-message-text" },
+                [
+                  ...(message.attachments || []).map((item) => `[${item.name || item.type}]`),
+                  ...message.text ? [message.text] : []
+                ].join(" ")
               ),
+              !message.editable && h("p", { className: "dsh-se-muted" }, explain(message.reason || "message-not-editable", t)),
               h(
                 "div",
-                { className: "dsh-se-message-actions" },
-                button(
-                  t("edit"),
-                  () => void controller.openEdit({
-                    ...message,
-                    sessionId: current.sessionId,
-                    title: current.title
-                  }),
-                  {
-                    disabled: !message.editable || controller.isBusy(current.sessionId, "edit-fork", message.eventSeq)
-                  }
-                ),
-                button(
-                  t("retry"),
-                  () => void controller.retryMessage({
-                    ...message,
-                    sessionId: current.sessionId,
-                    title: current.title
-                  }),
-                  {
-                    disabled: !message.editable || controller.isBusy(current.sessionId, "retry-fork", message.eventSeq)
-                  }
-                )
+                { className: "dsh-se-row-actions" },
+                h("time", { dateTime: new Date(message.time).toISOString() }, clock(message.time)),
+                action(t("editTitle"), EditIcon, () => void controller.openEdit({ ...message, sessionId: current.sessionId, title: current.title }), {
+                  unavailable: !message.editable,
+                  busy: controller.isBusy(current.sessionId, "edit", message.eventSeq)
+                }),
+                action(t("retryTitle"), RetryIcon, () => void controller.retryMessage({ ...message, sessionId: current.sessionId }), {
+                  unavailable: !message.editable,
+                  busy: controller.isBusy(current.sessionId, "retry", message.eventSeq)
+                })
               )
             )
           )
-        )
-      );
-    }
-    function Editor({ current, t }) {
-      return h(
-        React.Fragment,
-        null,
-        h("p", { className: "dsh-se-muted" }, t("branchExplanation")),
-        h("textarea", {
-          className: "dsh-se-textarea",
-          "aria-label": t("textLabel"),
-          value: current.text,
-          autoFocus: true,
-          readOnly: current.busy || current.loading,
-          spellCheck: false,
-          "data-testid": "edit-text",
-          onChange: (event) => controller.setText(event.target.value)
-        })
+        ))
       );
     }
     function Overlay() {
       const t = useTranslation();
       const state = useState();
       const current = state.panel;
-      const dialog = React.useRef(null);
-      React.useEffect(() => {
-        const element = dialog.current;
-        if (current && element && !element.open) element.showModal();
-      }, [Boolean(current)]);
-      const dismiss = () => {
-        dialog.current?.close();
-        controller.close();
-      };
-      const title = current?.view === "editor" ? "editTitle" : "historyTitle";
+      const historyOpen = current && (current.view === "history" || current.placement === "history");
+      const notice = state.notice?.action !== "continue" ? state.notice : null;
       return h(
         React.Fragment,
         null,
         h("style", { "data-session-edit-styles": true }, client_default),
-        state.notice && h(
-          "div",
-          { className: "dsh-se-notice", role: "alert" },
-          h(
-            "p",
-            null,
-            state.notice.code === "session-edit/navigation-failed" ? t("navigationFailed") : explain(state.notice, t)
-          ),
-          state.notice.sessionId && button(t("openConversation"), () => {
-            const id = state.notice.sessionId;
+        notice && h(Toast, {
+          key: state.revision,
+          text: notice.code === "session-edit/navigation-failed" ? t("navigationFailed") : explain(notice, t),
+          icon: h(WarningIcon),
+          holdMs: 8e3,
+          onDone: controller.clearNotice,
+          actions: notice.sessionId ? [{ label: t("openConversation"), onClick: () => {
             controller.clearNotice();
-            void controller.openResult({ sourceSessionId: id });
-          }),
-          button(t("close"), () => controller.clearNotice())
-        ),
-        current && h(
-          "dialog",
-          {
-            ref: dialog,
-            className: "dsh-se-dialog",
-            "aria-modal": true,
-            "aria-labelledby": "dsh-se-title",
-            "data-testid": "session-edit-dialog",
-            onCancel: (event) => {
-              event.preventDefault();
-              dismiss();
-            },
-            onClick: (event) => {
-              if (event.target !== event.currentTarget) return;
-              const rect = event.currentTarget.getBoundingClientRect();
-              if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
-                dismiss();
-              }
-            }
-          },
-          h(
-            "header",
-            { className: "dsh-se-header" },
-            h("h2", { id: "dsh-se-title", className: "dsh-se-title" }, t(title)),
-            h(
-              "button",
-              {
-                type: "button",
-                className: "dsh-se-action dsh-se-close",
-                "aria-label": t("close"),
-                onClick: dismiss
-              },
-              "\xD7"
-            )
-          ),
-          h(
-            "div",
-            { className: "dsh-se-content" },
-            h("p", { className: "dsh-se-subtitle" }, current.title || t("untitled")),
-            current.error && h("p", { className: "dsh-se-error", role: "alert" }, explain(current.error, t)),
-            current.loading && h("p", { role: "status" }, t("loading")),
-            current.view === "history" && h(History, { current, t }),
-            current.view === "editor" && h(Editor, { current, t })
-          ),
-          h(
-            "footer",
-            { className: "dsh-se-footer" },
-            current.view === "editor" && current.historyState && button(t("backToHistory"), () => controller.backToHistory()),
-            button(t(current.view === "editor" ? "cancel" : "close"), dismiss),
-            current.view === "editor" && button(t("confirmEdit"), () => void controller.submitEdit(), {
-              primary: true,
-              disabled: current.busy || current.loading || !current.messageId || !current.text?.trim() || controller.isBusy(current.sessionId, "edit-fork", current.eventSeq),
-              testId: "execute-action"
-            })
-          )
-        )
+            void controller.openResult({ sourceSessionId: notice.sessionId, historyUpdated: notice.historyUpdated });
+          } }] : void 0
+        }),
+        h(Modal, {
+          open: Boolean(historyOpen),
+          onClose: controller.close,
+          title: t("historyTitle"),
+          closeLabel: t("close"),
+          description: current?.title || t("untitled"),
+          className: "dsh-se-history-modal",
+          footer: h(Button, { size: "sm", onClick: controller.close }, t("close"))
+        }, historyOpen && h("div", { "data-testid": "session-edit-dialog" }, h(History, { current })))
       );
     }
-    ctx.slots.inject(
-      "sidebar.workspaces.session.menu.item",
-      () => ctx.slots.register(
-        {
-          name: "sidebar.workspaces.session.menu.item",
-          id: "dsh-session-edit.history",
-          order: 450,
-          label: () => translate("menu")
-        },
-        MenuItem
-      )
-    );
-    ctx.slots.inject(
-      "shell.overlay",
-      () => ctx.slots.register(
-        { name: "shell.overlay", id: "dsh-session-edit.dialog", order: 120 },
-        Overlay
-      )
-    );
-    for (const key of ["user", "steering"]) {
-      ctx.slots.inject(
-        "conversation.chat.node",
-        () => ctx.slots.register({ name: "conversation.chat.node", key, priority: -100 }, UserMessage)
-      );
-    }
-    ctx.slots.inject(
-      "conversation.composer.dock",
-      () => ctx.slots.register(
-        { name: "conversation.composer.dock", id: "dsh-session-edit.continue", order: 10 },
-        ContinueDock
-      )
-    );
+    const register = (name, options, component) => ctx.slots.inject(name, () => ctx.slots.register({ name, ...options }, component));
+    register("sidebar.workspaces.session.menu.item", { id: "dsh-session-edit.history", order: 450, label: () => translate("menu") }, HistoryMenu);
+    register("shell.overlay", { id: "dsh-session-edit.dialog", order: 120 }, Overlay);
+    for (const key of ["user", "steering"]) register("conversation.chat.node", { key, priority: -100 }, UserMessage);
+    register("conversation.input.right", { id: "dsh-session-edit.primary", order: 100 }, ComposerContinue);
+    register("conversation.composer.dock", { id: "dsh-session-edit.continue", order: 10 }, ContinueStatus);
+    register("conversation.input.dock", { id: "dsh-session-edit.notice", order: 10 }, ComposerNotice);
   }
   window.__ModuleLoader__.load({
     id: "dsh-session-edit",
     factory(require2) {
+      const React = require2("react");
+      const ReactDOM = require2("react-dom");
+      const ui = require2("@deepseek-ai/dsh-client-ui-primitives");
       return {
         inject: ["remote"],
         async apply(ctx) {
           await ctx.remote.$mount(remoteContribution());
-          ctx.inject(
-            ["slots", "locale", "remote", "remote.sessionEdit", "uiWorkspace"],
-            (uiCtx) => mountUI(uiCtx, require2("react"))
-          );
+          ctx.inject(["slots", "locale", "remote", "remote.sessionEdit", "sessions", "uiWorkspace"], (uiCtx) => mountUI(uiCtx, React, ReactDOM, ui));
         }
       };
     }

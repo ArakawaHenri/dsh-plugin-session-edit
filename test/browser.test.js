@@ -7,9 +7,11 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { chromium } from 'playwright';
 import { buildClientSource } from '../scripts/build-client.js';
+import { nativeClientFixture } from './helpers/native-client.js';
 
 const require = createRequire(import.meta.url);
 const client = await buildClientSource();
+const native = await nativeClientFixture();
 const react = await readFile(
   join(dirname(require.resolve('react/package.json')), 'umd/react.development.js'),
 );
@@ -44,7 +46,9 @@ function bootFixture() {
     factories: [],
     rpcCalls: [],
     disposers: [],
-    session: { running: false, openState: 'ready' },
+    session: { running: false, openState: 'ready', removed: false, subagent: null },
+    input: { draft: '', phase: 'plain', attachmentIds: [], queue: [] },
+    sent: [], stops: 0, extension: true, inspectReplies: 0, reloads: [], remoteListeners: new Map(),
     listeners: new Set(),
   });
   window.__ModuleLoader__ = {
@@ -65,12 +69,20 @@ function bootFixture() {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(request),
           });
-          return response.json();
+          const reply = await response.json();
+          if (method === 'inspect') fixture.inspectReplies++;
+          if (method === 'execute' && request.action === 'continue' && reply.ok) fixture.setRunning(true);
+          if (method === 'execute' && reply.ok && reply.value.historyUpdated) fixture.publishRewrite();
+          return reply;
         },
       ]),
     );
     services.set('slots', {
-      inject: (_name, callback) => callback(),
+      inject: (_name, callback) => {
+        const dispose = callback();
+        fixture.disposers.push(dispose);
+        return dispose;
+      },
       register: (options, component) => {
         const key = `${options.name}:${options.key || options.id || ''}`;
         fixture.slots.set(key, { options, component });
@@ -86,7 +98,15 @@ function bootFixture() {
       subscribe: () => () => {},
       getSnapshot: () => 'en',
     });
-    services.set('remote', { $mount: async () => {} });
+    services.set('remote', {
+      $mount: async () => {},
+      $on(name, listener) {
+        const listeners = fixture.remoteListeners.get(name) ?? new Set();
+        fixture.remoteListeners.set(name, listeners);
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
     services.set('remote.sessionEdit', rpc);
     services.set('uiWorkspace', {
       openSession: id => {
@@ -94,7 +114,31 @@ function bootFixture() {
       },
     });
     services.set('uiSession', {});
-    services.set('sessions', {});
+    const nativeSession = {
+      removed: false,
+      projections: { clear() {} },
+      getSnapshot: () => ({ ...fixture.session, removed: nativeSession.removed }),
+      async resync() {
+        fixture.reloads.push('source');
+        const selected = await (await fetch('/native/history')).json();
+        message.data = { ...message.data, messageId: selected.messageId, content: [{ type: 'text', text: selected.text }] };
+        fixture.session = { ...fixture.session, removed: false };
+        fixture.root.render(h(App));
+        for (const listener of fixture.listeners) listener();
+      },
+    };
+    const manager = {
+      projectionStores: new Map([['source', nativeSession.projections]]),
+      projectionInflight: new Map(), projectionLoads: new Map(), handleSessionAdded() {},
+    };
+    services.set('sessions', { binding: id => id === 'source' ? { session: nativeSession } : undefined, manager, refresh: async () => {} });
+    fixture.publishRewrite = () => {
+      nativeSession.removed = true;
+      fixture.session = { ...fixture.session, removed: true, running: true };
+      manager.projectionStores.delete('source');
+      for (const listener of fixture.listeners) listener();
+      for (const listener of fixture.remoteListeners.get('api-session/added') ?? []) listener({ sessionId: 'source', running: true });
+    };
 
     function context(names) {
       const ctx = {
@@ -124,6 +168,8 @@ function bootFixture() {
 
     const plugin = fixture.entry.factory(name => {
       if (name === 'react') return React;
+      if (name === 'react-dom') return window.ReactDOM;
+      if (name === '@deepseek-ai/dsh-client-ui-primitives') return window.NativeUI;
       throw new Error(`Unexpected module: ${name}`);
     });
     await plugin.apply(context(plugin.inject));
@@ -132,6 +178,8 @@ function bootFixture() {
     const Menu = get('sidebar.workspaces.session.menu.item:dsh-session-edit.history');
     const User = get('conversation.chat.node:user');
     const Dock = get('conversation.composer.dock:dsh-session-edit.continue');
+    const Primary = get('conversation.input.right:dsh-session-edit.primary');
+    const Notice = get('conversation.input.dock:dsh-session-edit.notice');
     const Overlay = get('shell.overlay:dsh-session-edit.dialog');
     const useSession = selector =>
       React.useSyncExternalStore(
@@ -142,6 +190,25 @@ function bootFixture() {
         () => selector(fixture.session),
       );
     const useRemoteAccess = () => true;
+    const useInput = selector => React.useSyncExternalStore(
+      listener => { fixture.listeners.add(listener); return () => fixture.listeners.delete(listener); },
+      () => selector(fixture.input),
+    );
+    fixture.useInput = useInput;
+    fixture.setInput = patch => {
+      fixture.input = { ...fixture.input, ...patch };
+      for (const listener of fixture.listeners) listener();
+    };
+    const common = { sessionId: 'source', useSession, useInput, useRemoteAccess };
+    const empty = {};
+    const keyboard = {
+      editor: null,
+      submit(mode) {
+        fixture.sent.push({ mode, text: fixture.input.draft, attachments: fixture.input.attachmentIds });
+        fixture.setInput({ draft: '', attachmentIds: [] });
+        fixture.setRunning(true);
+      },
+    };
     const message = {
       kind: 'user',
       data: {
@@ -176,13 +243,13 @@ function bootFixture() {
       return h(
         'main',
         null,
-        h(Menu, {
+        fixture.extension && h(Menu, {
           sessionId: 'source',
           displayTitle: 'Source',
           useRemoteAccess,
           useMenuOpenState: () => React.useState(false),
         }),
-        h(User, {
+        fixture.extension && h(User, {
           sessionId: 'source',
           node: message,
           useSession,
@@ -190,8 +257,22 @@ function bootFixture() {
           renderFactorySlot: factory,
           loadImage: async () => null,
         }),
-        h(Dock, { sessionId: 'source', useSession, useRemoteAccess }),
-        h(Overlay),
+        fixture.extension && h(Notice, common),
+        h(window.NativeInputBar, {
+          ...common, variant: 'composer', keyboard, inputActions: { pruneAttachments() {} },
+          disabled: fixture.locked,
+          stop: () => { fixture.stops++; fixture.setRunning(false); },
+          resolveDraftAttachments: ids => ids.map(id => ({ id, kind: 'image' })),
+          t: key => window.NativeConversationLocale[key] || key,
+          useBusyEnter: select => select('queue'),
+          useFileUploads: select => select(empty), useNotices: select => select(null),
+          useLexicon: select => select(empty), useMenuLauncher: select => select(null),
+          useStopShortcut: select => select([]),
+          useProjection: (_name, select) => select ? select(undefined) : undefined,
+          renderSlot: name => !fixture.extension ? null : name === 'conversation.input.right'
+            ? h(Primary, common) : name === 'conversation.composer.dock' ? h(Dock, common) : null,
+        }),
+        fixture.extension && h(Overlay),
       );
     }
     fixture.root = window.ReactDOM.createRoot(document.getElementById('root'));
@@ -203,6 +284,13 @@ function bootFixture() {
     fixture.setRunning = running => {
       fixture.session = { ...fixture.session, running };
       for (const listener of fixture.listeners) listener();
+    };
+    fixture.setLocked = locked => { fixture.locked = locked; fixture.root.render(h(App)); };
+    fixture.unload = async () => {
+      fixture.extension = false;
+      fixture.root.render(h(App));
+      await new Promise(requestAnimationFrame);
+      for (const dispose of fixture.disposers.reverse()) dispose?.();
     };
     fixture.ready = true;
   };
@@ -234,7 +322,7 @@ async function fixture(t, options = {}) {
     nextBeforeSeq: 40,
     continuation: {
       available: state.continuationAvailable,
-      canSendPrompt: true,
+      canSendPrompt: state.canSendPrompt ?? true,
       tailRole: 'assistant',
       reason: state.reason,
     },
@@ -243,19 +331,21 @@ async function fixture(t, options = {}) {
     eventSeq: 7,
     messageId: 'message-7',
     text: 'Original selected input',
-    time: 1750000000000,
+    time: 1760000000000,
     editable: true,
   };
   const assets = {
     '/react.js': react,
     '/react-dom.js': reactDom,
     '/client.js': client,
+    '/native.js': native.js,
+    '/native.css': native.css,
   };
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
       if (assets[url.pathname]) {
-        response.setHeader('content-type', 'text/javascript');
+        response.setHeader('content-type', url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript');
         response.end(assets[url.pathname]);
         return;
       }
@@ -264,10 +354,18 @@ async function fixture(t, options = {}) {
         response.end();
         return;
       }
+      if (url.pathname === '/native/history') {
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify(selected));
+        return;
+      }
       if (url.pathname === '/') {
         response.setHeader('content-type', 'text/html');
         response.end(
-          `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:14px sans-serif;padding:20px}main{max-width:900px;margin:auto}</style></head><body><div id="root"></div><script src="/react.js"></script><script src="/react-dom.js"></script><script>(${bootFixture.toString()})();</script><script src="/client.js"></script><script>fixture.start();</script></body></html>`,
+          `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/native.css"><style>
+          :root{--dsw-font-family:Arial,sans-serif;--dsw-font-xs-13:13px/20px Arial;--dsw-alias-label-primary:#222;--dsw-alias-label-secondary:#666;--dsw-alias-label-tertiary:#888;--dsw-alias-label-caption:#888;--dsw-alias-label-primary-foreground:#fff;--dsw-alias-bg-base:#fff;--dsw-alias-bg-layer-1:#fff;--dsw-alias-bg-layer-2:#fff;--dsw-alias-border-l2:#ddd;--dsw-alias-border-l3:#ddd;--dsw-alias-border-l4:#eee;--dsw-alias-interactive-bg-hover:#f1f1f1;--dsw-alias-button-primary-fill:#222;--dsw-alias-button-info-fill:#222;--dsw-alias-state-error-primary:#b23;--dsw-alias-state-business-primary:#5277df;--dsw-specific-input-major:#fafafa;--dsw-specific-menu:#fff;--dsw-radius-sm:6px;--dsw-radius-md:10px;--dsw-radius-lg:12px;--dsw-radius-panel:16px;--dsh-composer-card-max-width:800px;--dsh-composer-side-clearance:0px}
+          body{font:14px/1.6 Arial;padding:20px}main{max-width:800px;margin:auto}.dsh-se-row{margin:24px 0}[data-testid=native-user-factory]{background:#f4f4f4;border-radius:16px;padding:12px 16px}[data-testid=native-draft]{min-height:64px;padding:8px 14px}
+          </style></head><body><div id="root"></div><script src="/react.js"></script><script src="/react-dom.js"></script><script src="/native.js"></script><script>(${bootFixture.toString()})();</script><script src="/client.js"></script><script>fixture.start();</script></body></html>`,
         );
         return;
       }
@@ -290,7 +388,17 @@ async function fixture(t, options = {}) {
           return;
         }
         if (state.executeGate) await state.executeGate.promise;
-        value = { sourceSessionId: 'source', childSessionId: 'fixture-child' };
+        if (input.action === 'continue') {
+          facts.status = 'running';
+          value = { sourceSessionId: 'source' };
+        } else {
+          if (input.action === 'edit') selected.text = input.replacementText;
+          selected.messageId = 'updated-message-7';
+          facts.messages = [{ ...selected }];
+          facts.nextBeforeSeq = null;
+          facts.status = 'running';
+          value = { sourceSessionId: 'source', historyUpdated: true };
+        }
       }
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({ ok: true, value }));
@@ -314,17 +422,19 @@ async function fixture(t, options = {}) {
   await page.goto(origin);
   await page.waitForFunction(() => window.fixture?.ready);
   await page.getByTestId('native-user-factory').waitFor();
-  return { page, state, facts, origin };
+  return { page, state, facts, selected, origin };
 }
 
-test('browser: editing uses one dialog and one submit while retaining the native body', async t => {
+test('browser: native inline editing submits once without opening a dialog', async t => {
   const { page, state } = await fixture(t);
   const body = await page.evaluate(() => fixture.factories.at(-1));
   assert.equal(body.name, 'conversation.chat.user.content');
   assert.deepEqual(body.facts, { sessionLabels: ['Source A'], skillNames: ['sample'] });
-  await page.getByRole('button', { name: 'Edit and branch', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
   await page.getByTestId('execute-action').waitFor();
-  await page.getByTestId('edit-text').fill('Changed message\nwith two lines');
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  assert.equal(await page.locator('[data-session-edit-message="7"] textarea').count(), 1);
+  await page.getByRole('textbox', { name: 'Message text' }).fill('Changed message\nwith two lines');
   await page.getByTestId('execute-action').evaluate(button => {
     button.click();
     button.click();
@@ -334,30 +444,36 @@ test('browser: editing uses one dialog and one submit while retaining the native
   assert.equal(writes.length, 1);
   assert.deepEqual(writes[0].input, {
     sessionId: 'source',
-    action: 'edit-fork',
+    action: 'edit',
     eventSeq: 7,
     messageId: 'message-7',
     replacementText: 'Changed message\nwith two lines',
   });
   assert.ok(state.calls.some(call => call.method === 'inspect' && call.input.eventSeq === 7));
   assert.equal(await page.getByTestId('session-edit-dialog').count(), 0);
-  assert.equal(await page.getByTestId('native-user-factory').textContent(), 'Original selected input');
+  assert.equal(await page.getByTestId('native-user-factory').textContent(), 'Changed message\nwith two lines');
+  assert.deepEqual(await page.evaluate(() => fixture.navigation), ['source']);
 });
 
 test('browser: history fallback pages then retries in one click even while the parent is running', async t => {
   const { page, state, facts } = await fixture(t);
   facts.status = 'running';
   await page.evaluate(() => fixture.setRunning(true));
-  await page.getByTestId('session-edit-menu').click();
+  await page.getByRole('menuitem', { name: 'Edit history / retry…' }).click();
   await page.getByTestId('load-older').click();
   const item = page.locator('[data-event-seq="7"]');
   await item.waitFor();
-  await item.getByRole('button', { name: 'Retry', exact: true }).click();
+  await item.getByRole('button', { name: 'Edit message', exact: true }).click();
+  await item.getByRole('textbox', { name: 'Message text' }).fill('An unsent history edit');
+  await item.getByRole('textbox', { name: 'Message text' }).press('Escape');
+  assert.equal(await page.getByRole('dialog').count(), 1);
+  assert.equal(await page.getByTestId('session-edit-inline').count(), 0);
+  await item.getByRole('button', { name: 'Regenerate from this message', exact: true }).click();
   await page.waitForFunction(() => fixture.navigation.length === 1);
   const command = state.calls.find(call => call.method === 'execute').input;
   assert.deepEqual(command, {
     sessionId: 'source',
-    action: 'retry-fork',
+    action: 'retry',
     eventSeq: 7,
     messageId: 'message-7',
   });
@@ -370,11 +486,9 @@ test('browser: history fallback pages then retries in one click even while the p
 
 test('browser: available continuation is one click and never adds prompt text', async t => {
   const { page, state } = await fixture(t);
-  await page
-    .getByTestId('session-edit-continue')
-    .getByRole('button', { name: 'Continue task', exact: true })
-    .click();
-  await page.waitForFunction(() => fixture.navigation.length === 1);
+  await page.getByRole('button', { name: 'Continue task', exact: true }).click();
+  await page.waitForFunction(() => fixture.session.running);
+  assert.deepEqual(await page.evaluate(() => fixture.navigation), []);
   const command = state.calls.find(call => call.method === 'execute').input;
   assert.deepEqual(command, {
     sessionId: 'source',
@@ -384,16 +498,17 @@ test('browser: available continuation is one click and never adds prompt text', 
   assert.equal(await page.getByTestId('session-edit-dialog').count(), 0);
 });
 
-test('browser: disabled direct continuation keeps an explicit one-click prompt action', async t => {
+test('browser: unsupported direct continuation exposes explicit prompt mode in the native menu', async t => {
   const { page, state } = await fixture(t, {
     continuationAvailable: false,
     reason: 'model-disabled',
   });
   const dock = page.getByTestId('session-edit-continue');
   await dock.waitFor();
-  assert.equal(await dock.getByRole('button', { name: 'Continue task', exact: true }).isDisabled(), true);
-  await dock.getByRole('button', { name: 'Send continuation message', exact: true }).click();
-  await page.waitForFunction(() => fixture.navigation.length === 1);
+  assert.equal(await page.getByTestId('session-edit-resume').count(), 0);
+  await dock.getByRole('button', { name: 'Continuation options' }).click();
+  await page.getByRole('menuitem', { name: 'Send continuation message', exact: true }).click();
+  await page.waitForFunction(() => fixture.session.running);
   assert.equal(state.calls.find(call => call.method === 'execute').input.continuationMode, 'prompt');
   assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
 });
@@ -402,11 +517,11 @@ test('browser: a forbidden response shows an alert banner', async t => {
   const { page } = await fixture(t, {
     rejectExecute: { code: 'session-edit/forbidden', message: 'Only owner' },
   });
-  await page.getByRole('button', { name: 'Retry this message', exact: true }).click();
+  await page.getByRole('button', { name: 'Regenerate from this message', exact: true }).click();
   await page.getByRole('alert').filter({ hasText: 'Only the host owner' }).waitFor();
 });
 
-test('browser: unsupported message content is preserved by the native Factory', async t => {
+test('browser: image and file attachments remain editable while unsupported blocks stay preserved by the native Factory', async t => {
   const { page } = await fixture(t);
   await page.evaluate(() =>
     fixture.setContent([
@@ -417,15 +532,166 @@ test('browser: unsupported message content is preserved by the native Factory', 
   );
   await page.locator('[data-attachment-type="image"]').waitFor();
   assert.equal(
-    await page.getByRole('button', { name: 'Edit and branch', exact: true }).isDisabled(),
-    true,
+    await page.getByRole('button', { name: 'Edit message', exact: true }).getAttribute('aria-disabled'),
+    null,
   );
   assert.equal(
-    await page.getByRole('button', { name: 'Retry this message', exact: true }).isDisabled(),
-    true,
+    await page.getByRole('button', { name: 'Regenerate from this message', exact: true }).getAttribute('aria-disabled'),
+    null,
   );
   assert.deepEqual(await page.evaluate(() => fixture.factories.at(-1).content.attachments), [
     { type: 'image', image: { attachment: { id: 'image-1', name: 'image.png' } } },
     { type: 'file', file: { id: 'file-1', name: 'file.txt', bytes: 12 } },
   ]);
+
+  await page.evaluate(() =>
+    fixture.setContent([
+      { type: 'text', text: 'With custom block' },
+      { type: 'custom-block', payload: 1 },
+    ]),
+  );
+  assert.equal(
+    await page.getByRole('button', { name: 'Edit message', exact: true }).getAttribute('aria-disabled'),
+    'true',
+  );
+  assert.equal(
+    await page.getByRole('button', { name: 'Regenerate from this message', exact: true }).getAttribute('aria-disabled'),
+    'true',
+  );
+  assert.deepEqual(await page.evaluate(() => fixture.factories.at(-1).content.extraBlocks), [
+    { type: 'custom-block', payload: 1 },
+  ]);
+});
+
+test('browser: the native primary keeps text, attachment, stop and busy-queue behavior', async t => {
+  const { page, state } = await fixture(t);
+  const resume = page.getByTestId('session-edit-resume');
+  await resume.waitFor();
+  const original = await page.locator('[data-session-edit-suppressed]').elementHandle();
+  assert.equal(await resume.getAttribute('class'), await original.getAttribute('class'));
+  const draft = page.getByTestId('native-draft');
+  await draft.fill('A normal message');
+  await page.waitForFunction(() => !document.querySelector('[data-session-edit-suppressed]'));
+  assert.equal(await resume.count(), 0);
+  assert.equal(await original.isVisible(), true);
+  assert.equal(await original.isDisabled(), false);
+  await draft.fill('  ');
+  await resume.waitFor();
+  await page.evaluate(() => fixture.setInput({ draft: '', attachmentIds: ['image-1'] }));
+  await page.waitForFunction(() => !document.querySelector('[data-session-edit-suppressed]'));
+  await original.click();
+  await page.waitForFunction(() => fixture.session.running);
+  assert.deepEqual(await page.evaluate(() => fixture.sent[0].attachments), ['image-1']);
+  await draft.fill('Follow up while running');
+  await original.click();
+  assert.equal(await page.evaluate(() => fixture.sent[1].mode), 'queue');
+  await original.click();
+  assert.equal(await page.evaluate(() => fixture.stops), 1);
+  await resume.waitFor();
+  assert.equal(state.calls.filter(call => call.method === 'execute').length, 0);
+});
+
+test('browser: the native inline editor handles IME, newline, cancel and draft restoration', async t => {
+  const { page, state } = await fixture(t);
+  await page.getByTestId('native-draft').fill('Unsent composer draft');
+  const edit = page.getByRole('button', { name: 'Edit message', exact: true });
+  await edit.click();
+  const field = page.getByRole('textbox', { name: 'Message text' });
+  await field.fill('First line');
+  await field.press('End');
+  await field.press('Shift+Enter');
+  await field.press('a');
+  await field.dispatchEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229 });
+  assert.equal(state.calls.filter(call => call.method === 'execute').length, 0);
+  assert.equal(await field.inputValue(), 'First line\na');
+  await field.press('Escape');
+  assert.equal(await page.getByTestId('session-edit-inline').count(), 0);
+  await edit.click();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="execute-action"]').disabled);
+  assert.equal(await field.inputValue(), 'First line\na');
+  await field.press('Enter');
+  await page.waitForFunction(() => fixture.navigation.length === 1);
+  assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
+  assert.equal(await page.getByTestId('native-draft').textContent(), 'Unsent composer draft');
+});
+
+test('browser: failed inline edits retain their text and report the error beside the message', async t => {
+  const { page, state } = await fixture(t, {
+    rejectExecute: { code: 'session-edit/host-error', message: 'Failed' },
+  });
+  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+  const field = page.getByRole('textbox', { name: 'Message text' });
+  await field.fill('Keep this edited text');
+  await page.getByTestId('execute-action').click();
+  await page.getByTestId('session-edit-inline').getByRole('alert').waitFor();
+  assert.equal(await field.inputValue(), 'Keep this edited text');
+  assert.equal(await field.isEditable(), true);
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
+});
+
+test('browser: continuation failure stays at the composer and prompt fallback is explicit', async t => {
+  const { page, state } = await fixture(t, {
+    rejectExecute: { code: 'session-edit/host-error', message: 'Failed' },
+  });
+  await page.getByTestId('session-edit-resume').click();
+  await page.locator('.dsh-se-composer-notice').getByText('The host could not complete the operation.').waitFor();
+  assert.equal(state.calls.filter(call => call.method === 'execute').length, 1);
+  assert.deepEqual(await page.evaluate(() => fixture.navigation), []);
+  state.rejectExecute = null;
+  await page.getByRole('button', { name: 'Continuation options' }).click();
+  await page.getByRole('menuitem', { name: 'Send continuation message' }).click();
+  await page.waitForFunction(() => fixture.session.running);
+  assert.deepEqual(state.calls.filter(call => call.method === 'execute').map(call => call.input.continuationMode), ['no-message', 'prompt']);
+});
+
+test('browser: blocked composers, claimed commands and pending queues keep their native primary', async t => {
+  const { page } = await fixture(t);
+  const resume = page.getByTestId('session-edit-resume');
+  await resume.waitFor();
+  await page.evaluate(() => fixture.setLocked(true));
+  await page.waitForFunction(() => !document.querySelector('[data-session-edit-suppressed]'));
+  assert.equal(await resume.count(), 0);
+  await page.evaluate(() => fixture.setLocked(false));
+  await resume.waitFor();
+  await page.evaluate(() => fixture.setInput({ phase: 'claimed', claim: { token: '/goal', name: 'goal' } }));
+  await page.waitForFunction(() => !document.querySelector('[data-session-edit-suppressed]'));
+  assert.equal(await resume.count(), 0);
+  await page.evaluate(() => fixture.setInput({ phase: 'plain', queue: [{}] }));
+  assert.equal(await resume.count(), 0);
+});
+
+test('browser: unloading restores the original button and retains the native editor', async t => {
+  const { page } = await fixture(t);
+  await page.getByTestId('session-edit-resume').waitFor();
+  const original = await page.locator('[data-session-edit-suppressed]').elementHandle();
+  const editor = await page.getByTestId('native-draft').elementHandle();
+  await page.evaluate(() => fixture.unload());
+  assert.equal(await original.isVisible(), true);
+  assert.equal(await original.isDisabled(), true);
+  assert.equal(await editor.evaluate(node => node.isConnected), true);
+  assert.equal(await page.locator('[data-session-edit-suppressed]').count(), 0);
+  assert.equal(await page.getByTestId('session-edit-resume').count(), 0);
+  await editor.fill('Still the native editor');
+  await original.click();
+  assert.equal(await page.evaluate(() => fixture.sent[0].text), 'Still the native editor');
+});
+
+test('browser: completed sessions have neither a resume button nor a continuation menu', async t => {
+  const { page } = await fixture(t, { continuationAvailable: false, canSendPrompt: false, reason: 'not-resumable' });
+  await page.waitForFunction(() => fixture.inspectReplies > 0);
+  assert.equal(await page.getByTestId('session-edit-resume').count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Continuation options' }).count(), 0);
+});
+
+test('browser: a rewrite from another window reloads the existing conversation', async t => {
+  const { page, selected } = await fixture(t);
+  await page.getByTestId('native-draft').fill('My unsent composer draft');
+  selected.text = 'Edited in another window';
+  selected.messageId = 'new-message-id';
+  await page.evaluate(() => fixture.publishRewrite());
+  await page.waitForFunction(() => document.querySelector('[data-testid="native-user-factory"]')?.textContent === 'Edited in another window');
+  assert.equal(await page.getByTestId('native-draft').textContent(), 'My unsent composer draft');
+  assert.deepEqual(await page.evaluate(() => fixture.navigation), []);
+  assert.ok(await page.evaluate(() => fixture.reloads.length > 0));
 });

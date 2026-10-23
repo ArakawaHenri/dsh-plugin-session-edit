@@ -57,7 +57,7 @@ export function remoteContribution() {
       sessionId: expectString(value.sessionId, 'sessionId'),
       action: value.action,
     };
-    if (!['edit-fork', 'retry-fork', 'continue'].includes(value.action)) {
+    if (!['edit', 'retry', 'continue'].includes(value.action)) {
       throw new TypeError('Invalid action.');
     }
     if (value.action === 'continue') {
@@ -83,7 +83,7 @@ export function remoteContribution() {
       }
       output.eventSeq = expectSeq(value.eventSeq, 'eventSeq');
       output.messageId = expectString(value.messageId, 'messageId');
-      if (value.action === 'edit-fork') {
+      if (value.action === 'edit') {
         output.replacementText = expectString(value.replacementText, 'replacementText', 131072);
       } else if (value.replacementText !== undefined) {
         throw new TypeError('Retry uses the original message content.');
@@ -107,7 +107,7 @@ export function remoteContribution() {
     execute: {
       properties: {
         sessionId: idSchema,
-        action: { enum: ['edit-fork', 'retry-fork', 'continue'] },
+        action: { enum: ['edit', 'retry', 'continue'] },
         eventSeq: seqSchema,
         messageId: idSchema,
         replacementText: { type: 'string', minLength: 1, maxLength: 131072 },

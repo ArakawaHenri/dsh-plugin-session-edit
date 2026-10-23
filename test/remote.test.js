@@ -172,14 +172,14 @@ test('trusted in-process invocation without a remote peer remains available', as
 
 test('unknown fields, invalid identities and incomplete action combinations fail before engine dispatch', async t => {
   const f = rpcFixture(t);
-  const fork = { sessionId: 's', action: 'retry-fork', eventSeq: 0, messageId: 'm' };
+  const fork = { sessionId: 's', action: 'retry', eventSeq: 0, messageId: 'm' };
   const bad = [
     ['inspect', { sessionId: 's', includeSecrets: true }],
     ['inspect', { sessionId: 's', beforeSeq: -1 }],
     ['inspect', { sessionId: 's', limit: 101 }],
     ['inspect', { sessionId: 's\0hidden' }],
     ['inspect', { sessionId: 's', eventSeq: 0, beforeSeq: 1 }],
-    ['execute', { ...fork, action: 'edit-fork', replacementText: 'x', role: 'system' }],
+    ['execute', { ...fork, action: 'edit', replacementText: 'x', role: 'system' }],
     ['execute', { ...fork, replacementText: 'client tampering' }],
     ['execute', { ...fork, continuationMode: 'prompt' }],
     ['execute', { ...valid.execute, eventSeq: 0 }],
@@ -188,15 +188,15 @@ test('unknown fields, invalid identities and incomplete action combinations fail
     ['execute', { ...valid.execute, continuationMode: 'fallback' }],
     ['execute', { ...valid.execute, promptLocale: 'fr' }],
     ['execute', { ...valid.execute, promptLocale: 'en' }],
-    ['execute', { ...fork, action: 'edit-fork', replacementText: 'x', promptLocale: 'zh' }],
-    ['execute', { ...fork, action: 'edit-fork', replacementText: ' ' }],
-    ['execute', { ...fork, action: 'edit-fork', replacementText: 'x'.repeat(131073) }],
+    ['execute', { ...fork, action: 'edit', replacementText: 'x', promptLocale: 'zh' }],
+    ['execute', { ...fork, action: 'edit', replacementText: ' ' }],
+    ['execute', { ...fork, action: 'edit', replacementText: 'x'.repeat(131073) }],
     ['execute', { ...fork, eventSeq: Number.MAX_SAFE_INTEGER + 1 }],
     ['execute', { ...fork, eventSeq: 0.5 }],
     ['execute', { sessionId: 's' }],
     ['execute', { action: 'continue' }],
-    ['execute', { sessionId: 's', action: 'retry-fork', eventSeq: 0 }],
-    ['execute', { sessionId: 's', action: 'retry-fork', messageId: 'm' }],
+    ['execute', { sessionId: 's', action: 'retry', eventSeq: 0 }],
+    ['execute', { sessionId: 's', action: 'retry', messageId: 'm' }],
   ];
   for (const [method, request] of bad) {
     const result = await f.invoke(method, request);
@@ -213,7 +213,7 @@ test('wire identities normalize consistently and seq zero is valid', () => {
   );
   const fork = {
     sessionId: 's',
-    action: 'edit-fork',
+    action: 'edit',
     eventSeq: 0,
     messageId: 'm',
     replacementText: '  preserved\n',

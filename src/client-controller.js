@@ -1,6 +1,6 @@
 // Self-contained so the ModuleLoader build can inline it without Node modules.
 export function createClientController(options) {
-  const { rpc, navigate, getLocale } = options;
+  const { rpc, navigate, getLocale, reloadSession } = options;
   const listeners = new Set();
   const drafts = new Map();
   const reads = new Map();
@@ -26,6 +26,7 @@ export function createClientController(options) {
   const errorOf = error => ({
     code: typeof error?.code === 'string' ? error.code : 'session-edit/transport',
     message: typeof error?.message === 'string' ? error.message : String(error || 'Request failed'),
+    ...(error?.details ? { details: error.details } : {}),
   });
 
   async function call(method, request) {
@@ -47,7 +48,7 @@ export function createClientController(options) {
 
   const actionKey = (sessionId, action, target) =>
     JSON.stringify([sessionId, action, action === 'continue' ? null : target]);
-  const draftKey = (sessionId, eventSeq) => JSON.stringify([sessionId, eventSeq]);
+  const draftKey = (sessionId, eventSeq, messageId) => JSON.stringify([sessionId, eventSeq, messageId]);
 
   function oneShot(key, work) {
     if (inFlight.has(key)) return inFlight.get(key);
@@ -86,7 +87,7 @@ export function createClientController(options) {
   }
 
   async function openResult(result, guardEpoch = panelEpoch) {
-    const id = result?.childSessionId || result?.sourceSessionId;
+    const id = result?.sourceSessionId;
     if (!id) return;
     if (guardEpoch !== panelEpoch) {
       // Panel churn since this action started. A foreign panel must never be
@@ -103,14 +104,21 @@ export function createClientController(options) {
       return;
     }
     if (snapshot.panel) close();
+    const navigationEpoch = panelEpoch;
     try {
+      if (result.historyUpdated) {
+        await reloadSession?.(id);
+        await loadSession(id, true);
+      }
+      if (navigationEpoch !== panelEpoch || disposed) return;
       await navigate(id);
     } catch (error) {
       publish({
         notice: {
-          code: 'session-edit/navigation-failed',
+          code: result.historyUpdated ? 'session-edit/refresh-failed' : 'session-edit/navigation-failed',
           message: errorOf(error).message,
           sessionId: id,
+          historyUpdated: result.historyUpdated,
         },
       });
     }
@@ -212,6 +220,12 @@ export function createClientController(options) {
       eventSeq: target.eventSeq,
     });
     const message = value.messages.find(item => item.eventSeq === target.eventSeq);
+    if (message && (
+      (target.text !== undefined && target.text !== message.text) ||
+      (target.time !== undefined && target.time !== message.time)
+    )) {
+      throw { code: 'session-edit/session-changed', message: 'The displayed message changed. Reload the conversation.' };
+    }
     if (!message?.messageId || !message.editable) {
       throw {
         code: `session-edit/${message?.reason || 'message-not-editable'}`,
@@ -222,19 +236,21 @@ export function createClientController(options) {
   }
 
   async function openEdit(target) {
-    const key = draftKey(target.sessionId, target.eventSeq);
+    const key = draftKey(target.sessionId, target.eventSeq, target.messageId);
     const prior = snapshot.panel;
+    const history = prior?.view === 'editor' ? prior.historyState : prior;
     const historyState =
-      prior?.view === 'history' && prior.sessionId === target.sessionId
+      history && prior.sessionId === target.sessionId && (prior.view === 'history' || prior.placement === 'history')
         ? {
-            title: prior.title,
-            messages: prior.messages,
-            nextBeforeSeq: prior.nextBeforeSeq,
+            title: history.title,
+            messages: history.messages,
+            nextBeforeSeq: history.nextBeforeSeq,
           }
         : null;
     const epoch = newPanel(target.sessionId, {
       title: target.title || prior?.title || '',
       view: 'editor',
+      placement: historyState ? 'history' : 'message',
       eventSeq: target.eventSeq,
       text: drafts.get(key) ?? target.text ?? '',
       loading: true,
@@ -245,7 +261,7 @@ export function createClientController(options) {
       updatePanel(
         {
           messageId: message.messageId,
-          text: drafts.get(key) ?? message.text,
+          text: drafts.get(draftKey(target.sessionId, target.eventSeq, message.messageId)) ?? message.text,
           loading: false,
           title: message.title || target.title || '',
         },
@@ -270,8 +286,8 @@ export function createClientController(options) {
 
   function setText(text) {
     const current = snapshot.panel;
-    if (!current || current.busy || current.view !== 'editor') return;
-    drafts.set(draftKey(current.sessionId, current.eventSeq), text);
+    if (!current || current.busy || current.loading || current.view !== 'editor') return;
+    drafts.set(draftKey(current.sessionId, current.eventSeq, current.messageId), text);
     updatePanel({ text, error: null });
   }
 
@@ -287,7 +303,7 @@ export function createClientController(options) {
     ) {
       return;
     }
-    const key = actionKey(current.sessionId, 'edit-fork', current.eventSeq);
+    const key = actionKey(current.sessionId, 'edit', current.eventSeq);
     if (inFlight.has(key)) return inFlight.get(key);
     const epoch = panelEpoch;
     updatePanel({ busy: true, error: null });
@@ -295,18 +311,30 @@ export function createClientController(options) {
       try {
         const result = await call('execute', {
           sessionId: current.sessionId,
-          action: 'edit-fork',
+          action: 'edit',
           eventSeq: current.eventSeq,
           messageId: current.messageId,
           replacementText: current.text,
         });
-        drafts.delete(draftKey(current.sessionId, current.eventSeq));
+        drafts.delete(draftKey(current.sessionId, current.eventSeq, current.messageId));
         if (disposed) return;
         await openResult(result, epoch);
       } catch (error) {
-        updatePanel({ busy: false, error: errorOf(error) }, epoch);
+        if (!await reportSavedFailure(current.sessionId, epoch, error)) {
+          updatePanel({ busy: false, error: errorOf(error) }, epoch);
+        }
       }
     });
+  }
+
+  async function reportSavedFailure(sessionId, epoch, error) {
+    if (!error?.details?.historyUpdated) return false;
+    if (disposed) return true;
+    if (epoch === panelEpoch && snapshot.panel?.sessionId === sessionId) close();
+    await reloadSession?.(sessionId).catch(() => {});
+    await loadSession(sessionId, true).catch(() => {});
+    publish({ notice: { ...errorOf(error), sessionId, historyUpdated: true } });
+    return true;
   }
 
   function reportActionError(sessionId, epoch, error) {
@@ -319,7 +347,7 @@ export function createClientController(options) {
   }
 
   function retryMessage(target) {
-    return oneShot(actionKey(target.sessionId, 'retry-fork', target.eventSeq), async () => {
+    return oneShot(actionKey(target.sessionId, 'retry', target.eventSeq), async () => {
       const epoch = panelEpoch;
       const inPanel = snapshot.panel?.sessionId === target.sessionId;
       if (inPanel) updatePanel({ busy: true, error: null }, epoch);
@@ -327,21 +355,23 @@ export function createClientController(options) {
         const message = await resolveTarget(target);
         const result = await call('execute', {
           sessionId: target.sessionId,
-          action: 'retry-fork',
+          action: 'retry',
           eventSeq: message.eventSeq,
           messageId: message.messageId,
         });
         if (disposed) return;
         await openResult(result, epoch);
       } catch (error) {
-        reportActionError(target.sessionId, epoch, error);
+        if (!await reportSavedFailure(target.sessionId, epoch, error)) {
+          reportActionError(target.sessionId, epoch, error);
+        }
       }
     });
   }
 
   function continueSession(sessionId, mode = 'no-message') {
     return oneShot(actionKey(sessionId, 'continue', mode), async () => {
-      const epoch = panelEpoch;
+      publish({ notice: null });
       try {
         const cached = snapshot.sessions[sessionId]?.value;
         const facts = cached ?? (await loadSession(sessionId, true));
@@ -354,7 +384,7 @@ export function createClientController(options) {
             message: facts.continuation.reason || 'Continuation unavailable',
           };
         }
-        const result = await call('execute', {
+        await call('execute', {
           sessionId,
           action: 'continue',
           continuationMode: mode,
@@ -363,9 +393,11 @@ export function createClientController(options) {
             : {}),
         });
         if (disposed) return;
-        await openResult(result, epoch);
+        // The composer already belongs to this session. Refresh admission facts
+        // without navigating, moving focus, or closing an inline editor.
+        await loadSession(sessionId, true).catch(() => {});
       } catch (error) {
-        reportActionError(sessionId, epoch, error);
+        publish({ notice: { ...errorOf(error), sessionId, action: 'continue' } });
       }
     });
   }
@@ -386,6 +418,9 @@ export function createClientController(options) {
     setText,
     submitEdit,
     openResult,
+    reportRefreshError(sessionId, error) {
+      publish({ notice: { ...errorOf(error), code: 'session-edit/refresh-failed', sessionId, historyUpdated: true } });
+    },
     close,
     isBusy: (sessionId, action, target) => inFlight.has(actionKey(sessionId, action, target)),
     clearNotice() {
