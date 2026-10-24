@@ -105,7 +105,7 @@ test('host startup registers the RPC methods without reading or mutating session
   assert.equal(fiber.state, 2);
   assert.ok(ctx.get('sessionEdit'));
   assert.equal(registrations.length, 1);
-  assert.equal(registrations[0].package, 'dsh-session-edit');
+  assert.equal(registrations[0].package, 'dsh-plus-session-edit');
   assert.equal(registrations[0].face, 'host');
   assert.deepEqual(
     registrations[0].invocations.map(item => item.method),
@@ -117,13 +117,13 @@ test('host startup registers the RPC methods without reading or mutating session
 
 test('all public descriptors use the strict direct request contract', () => {
   const contribution = remoteContribution();
-  assert.equal(contribution.package, 'dsh-session-edit');
+  assert.equal(contribution.package, 'dsh-plus-session-edit');
   assert.deepEqual(
     contribution.descriptors.map(item => item.method),
     methods,
   );
   for (const descriptor of contribution.descriptors) {
-    assert.equal(descriptor.id, `dsh-session-edit#sessionEdit/${descriptor.method}`);
+    assert.equal(descriptor.id, `dsh-plus-session-edit#sessionEdit/${descriptor.method}`);
     assert.equal(descriptor.service, 'sessionEdit');
     assert.equal(descriptor.namespace, 'sessionEdit');
     assert.deepEqual(descriptor.invocation, { kind: 'direct' });

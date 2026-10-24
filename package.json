@@ -1,8 +1,8 @@
 {
-  "name": "dsh-session-edit",
+  "name": "dsh-plus-session-edit",
   "version": "0.2.0",
   "type": "module",
-  "description": "Edit and regenerate historical DeepSeek Harness messages in place, and continue stopped sessions",
+  "description": "DSH Plus · Session Edit: Edit and retry historical messages in place, and continue interrupted sessions.",
   "license": "MIT",
   "engines": {
     "node": ">=24",
@@ -12,7 +12,8 @@
     ".": "./index.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.svg",
+    "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
     "index.js",
@@ -95,5 +96,14 @@
     "react-dom": "18.3.1",
     "semver": "7.8.5",
     "zustand": "4.5.7"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArakawaHenri/dsh-plus-session-edit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ArakawaHenri/dsh-plus-session-edit/issues"
+  },
+  "homepage": "https://github.com/ArakawaHenri/dsh-plus-session-edit#readme",
+  "icon": "./icon.svg"
 }

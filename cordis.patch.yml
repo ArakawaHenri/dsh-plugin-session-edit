@@ -1,4 +1,4 @@
 - insert:
-    - id: session-edit
-      name: 'dsh-session-edit'
+    - id: dsh-plus-session-edit
+      name: 'dsh-plus-session-edit'
       config: {}

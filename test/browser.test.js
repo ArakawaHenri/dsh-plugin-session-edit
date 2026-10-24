@@ -176,8 +176,8 @@ function bootFixture() {
 
     const get = key => fixture.slots.get(key).component;
     const User = get('conversation.chat.node:user');
-    const Primary = get('conversation.input.right:dsh-session-edit.primary');
-    const Overlay = get('shell.overlay:dsh-session-edit.dialog');
+    const Primary = get('conversation.input.right:dsh-plus-session-edit.primary');
+    const Overlay = get('shell.overlay:dsh-plus-session-edit.dialog');
     const useSession = selector =>
       React.useSyncExternalStore(
         listener => {

@@ -27,7 +27,7 @@ function loadPlugin() {
     setTimeout,
     clearTimeout,
   });
-  assert.equal(entry.id, 'dsh-session-edit');
+  assert.equal(entry.id, 'dsh-plus-session-edit');
   return entry.factory(name => {
     if (name === 'react-dom' || name === '@deepseek-ai/dsh-client-ui-primitives') return {};
     assert.equal(name, 'react');
@@ -130,7 +130,7 @@ function fixture(t, { lateNamespace = false, deferredMount = false, sessions = {
     }
     async $mount(contribution) {
       counts.mounts++;
-      assert.equal(contribution.package, 'dsh-session-edit');
+      assert.equal(contribution.package, 'dsh-plus-session-edit');
       assert.deepEqual(
         Array.from(contribution.descriptors, entry => entry.method),
         ['inspect', 'execute'],
@@ -186,8 +186,8 @@ function mounted(f) {
   assert.ok(f.slots.has('conversation.chat.node:user'));
   assert.ok(f.slots.has('conversation.chat.node:steering'));
   assert.equal(f.slots.get('conversation.chat.node:user').priority, -100);
-  assert.ok(f.slots.has('conversation.input.right:dsh-session-edit.primary'));
-  assert.ok(f.slots.has('shell.overlay:dsh-session-edit.dialog'));
+  assert.ok(f.slots.has('conversation.input.right:dsh-plus-session-edit.primary'));
+  assert.ok(f.slots.has('shell.overlay:dsh-plus-session-edit.dialog'));
   assert.equal(f.dictionaries.size, 1);
   assert.equal(f.counts.calls, 0);
   assert.deepEqual(f.errors, []);

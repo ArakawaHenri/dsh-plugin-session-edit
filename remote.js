@@ -1,6 +1,6 @@
 // Shared with the browser build (bundled by esbuild; no self-containment constraint).
 export function remoteContribution() {
-  const packageName = 'dsh-session-edit';
+  const packageName = 'dsh-plus-session-edit';
 
   const expectObject = (value, allowed) => {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {

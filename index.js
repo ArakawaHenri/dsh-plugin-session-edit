@@ -4,7 +4,7 @@ import { remoteContribution } from './remote.js';
 import { SessionEditEngine } from './lib/service.js';
 import { SessionEditError, publicFailure } from './lib/errors.js';
 
-export const name = 'dsh-session-edit';
+export const name = 'dsh-plus-session-edit';
 export const inject = [
   'typert',
   'sessionController',

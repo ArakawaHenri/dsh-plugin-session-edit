@@ -1,4 +1,8 @@
 {
+  "meta": {
+    "title": "DSH Plus · Session Edit",
+    "description": "Edit and retry historical messages in place, and continue interrupted sessions."
+  },
   "editTitle": "Edit",
   "retryTitle": "Retry",
   "close": "Close",

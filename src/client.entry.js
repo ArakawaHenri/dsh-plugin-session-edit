@@ -255,13 +255,13 @@ function mountUI(ctx, React, { createPortal }, ui) {
   }
 
   const register = (name, options, component) => ctx.slots.inject(name, () => ctx.slots.register({ name, ...options }, component));
-  register('shell.overlay', { id: 'dsh-session-edit.dialog', order: 120 }, Overlay);
+  register('shell.overlay', { id: 'dsh-plus-session-edit.dialog', order: 120 }, Overlay);
   for (const key of ['user', 'steering']) register('conversation.chat.node', { key, priority: -100 }, UserMessage);
-  register('conversation.input.right', { id: 'dsh-session-edit.primary', order: 100 }, ComposerContinue);
+  register('conversation.input.right', { id: 'dsh-plus-session-edit.primary', order: 100 }, ComposerContinue);
 }
 
 window.__ModuleLoader__.load({
-  id: 'dsh-session-edit',
+  id: 'dsh-plus-session-edit',
   factory(require) {
     const React = require('react');
     const ReactDOM = require('react-dom');

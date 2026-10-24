@@ -1,4 +1,8 @@
 {
+  "meta": {
+    "title": "DSH Plus · 会话编辑",
+    "description": "在原会话中编辑、重试历史消息，并继续中断的会话。"
+  },
   "editTitle": "编辑",
   "retryTitle": "重试",
   "close": "关闭",

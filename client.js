@@ -2,7 +2,7 @@
 (() => {
   // remote.js
   function remoteContribution() {
-    const packageName = "dsh-session-edit";
+    const packageName = "dsh-plus-session-edit";
     const expectObject = (value, allowed) => {
       if (value === null || typeof value !== "object" || Array.isArray(value)) {
         throw new TypeError("Expected an object.");
@@ -505,6 +505,10 @@
 
   // locale/en.json
   var en_default = {
+    meta: {
+      title: "DSH Plus \xB7 Session Edit",
+      description: "Edit and retry historical messages in place, and continue interrupted sessions."
+    },
     editTitle: "Edit",
     retryTitle: "Retry",
     close: "Close",
@@ -548,6 +552,10 @@
 
   // locale/zh.json
   var zh_default = {
+    meta: {
+      title: "DSH Plus \xB7 \u4F1A\u8BDD\u7F16\u8F91",
+      description: "\u5728\u539F\u4F1A\u8BDD\u4E2D\u7F16\u8F91\u3001\u91CD\u8BD5\u5386\u53F2\u6D88\u606F\uFF0C\u5E76\u7EE7\u7EED\u4E2D\u65AD\u7684\u4F1A\u8BDD\u3002"
+    },
     editTitle: "\u7F16\u8F91",
     retryTitle: "\u91CD\u8BD5",
     close: "\u5173\u95ED",
@@ -875,12 +883,12 @@
       );
     }
     const register = (name, options, component) => ctx.slots.inject(name, () => ctx.slots.register({ name, ...options }, component));
-    register("shell.overlay", { id: "dsh-session-edit.dialog", order: 120 }, Overlay);
+    register("shell.overlay", { id: "dsh-plus-session-edit.dialog", order: 120 }, Overlay);
     for (const key of ["user", "steering"]) register("conversation.chat.node", { key, priority: -100 }, UserMessage);
-    register("conversation.input.right", { id: "dsh-session-edit.primary", order: 100 }, ComposerContinue);
+    register("conversation.input.right", { id: "dsh-plus-session-edit.primary", order: 100 }, ComposerContinue);
   }
   window.__ModuleLoader__.load({
-    id: "dsh-session-edit",
+    id: "dsh-plus-session-edit",
     factory(require2) {
       const React = require2("react");
       const ReactDOM = require2("react-dom");
