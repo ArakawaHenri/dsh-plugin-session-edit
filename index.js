@@ -2,7 +2,6 @@ import z from '@deepseek-ai/schemastery';
 import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protocol';
 import { remoteContribution } from './remote.js';
 import { SessionEditEngine } from './lib/service.js';
-import { assertRuntime } from './lib/host-adapter.js';
 import { SessionEditError, publicFailure } from './lib/errors.js';
 
 export const name = 'dsh-session-edit';
@@ -57,7 +56,6 @@ export class SessionEditService extends TypertRemoteService {
 }
 
 export async function apply(ctx) {
-  assertRuntime();
   const engine = new SessionEditEngine(ctx);
   try {
     ctx.effect(() => () => engine.close(), 'sessionEdit.lifecycle');

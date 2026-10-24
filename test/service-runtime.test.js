@@ -423,13 +423,89 @@ test('unsupported storage is rejected before retiring the live conversation', op
   const source = await f.createSource();
   const events = await f.send(source.agent, 'Keep this conversation active.');
   const persistence = f.ctx.sessionPersistence;
-  const encode = persistence.encodeMaterialization;
-  persistence.encodeMaterialization = undefined;
+  for (const method of ['encodeMaterialization', 'locate', 'open']) {
+    const original = persistence[method];
+    persistence[method] = undefined;
+    try {
+      await assert.rejects(f.engine.execute(editCommand(source.agent, userEvents(events)[0], 'edit', 'Not applied.')), code('unsupported-backend'));
+      assert.equal(f.ctx.agents.get(source.agent.id), source.agent);
+      assert.deepEqual(source.agent.session.snapshotEvents(), events);
+    } finally { persistence[method] = original; }
+  }
+  assert.deepEqual(await f.readStored(source.agent.id), events);
+  assert.equal(f.requests.length, 1);
+});
+
+test('an unknown session format blocks rewriting without blocking inspection or native continuation', options, async t => {
+  const f = await createRuntime(t);
+  const source = await f.createSource();
+  const events = await f.stop(source.agent);
+  const target = userEvents(events)[0];
+  const snapshot = f.host.snapshot.bind(f.host);
+  // Simulate a new header format with unchanged events and host interfaces.
+  t.mock.method(f.host, 'snapshot', async id => {
+    const value = await snapshot(id);
+    return { ...value, header: { ...value.header, version: 5 } };
+  });
+  const inspected = await f.engine.inspect({ sessionId: source.agent.id, eventSeq: target.seq });
+  assert.equal(inspected.message.text, text(target.data));
+  assert.equal(inspected.continuation.available, true);
+  for (const action of ['edit', 'retry']) {
+    await assert.rejects(f.engine.execute(editCommand(source.agent, target, action, 'Not applied.')), code('unsupported-format'));
+  }
+  assert.equal(f.ctx.agents.get(source.agent.id), source.agent);
+  assert.deepEqual(source.agent.session.snapshotEvents(), events);
+  assert.deepEqual(await f.readStored(source.agent.id), events);
+  assert.equal(f.requests.length, 1);
+
+  await f.engine.execute({ sessionId: source.agent.id, action: 'continue' });
+  await source.agent.whenIdle();
+  assert.equal(f.requests.length, 2);
+  assert.deepEqual(userEvents(source.agent.session.snapshotEvents()), userEvents(events));
+});
+
+test('an unknown agent teardown blocks rewriting before retirement but allows continuation', options, async t => {
+  const f = await createRuntime(t);
+  const source = await f.createSource();
+  const events = await f.stop(source.agent);
+  const lifecycle = f.ctx.root.fiber.getEffects().find(effect => effect.label === 'agentLoop.lifecycle(' + source.agent.id + ')');
+  assert.ok(lifecycle);
+  const label = lifecycle.label;
+  lifecycle.label = 'unknown-agent-lifecycle';
   try {
-    await assert.rejects(f.engine.execute(editCommand(source.agent, userEvents(events)[0], 'edit', 'Not applied.')), code('unsupported-backend'));
+    await assert.rejects(f.engine.execute(editCommand(source.agent, userEvents(events)[0], 'edit', 'Not applied.')), code('unsupported-runtime'));
     assert.equal(f.ctx.agents.get(source.agent.id), source.agent);
     assert.deepEqual(source.agent.session.snapshotEvents(), events);
-  } finally { persistence.encodeMaterialization = encode; }
+    assert.deepEqual(await f.readStored(source.agent.id), events);
+    assert.equal(f.requests.length, 1);
+
+    await f.engine.execute({ sessionId: source.agent.id, action: 'continue' });
+    await source.agent.whenIdle();
+    assert.equal(f.requests.length, 2);
+    assert.deepEqual(userEvents(source.agent.session.snapshotEvents()), userEvents(events));
+  } finally { lifecycle.label = label; }
+});
+
+test('missing continuation hooks fail before waking the agent or changing history', options, async t => {
+  const f = await createRuntime(t);
+  const source = await f.createSource();
+  const events = await f.stop(source.agent);
+  for (const [owner, method] of [[source.agent, 'wakeDriver'], [source.agent, 'whenIdle'], [source.agent.ctx, 'on']]) {
+    const original = owner[method];
+    owner[method] = undefined;
+    try {
+      await assert.rejects(f.engine.execute({ sessionId: source.agent.id, action: 'continue' }), code('unsupported-runtime'));
+      assert.equal(f.ctx.agents.get(source.agent.id), source.agent);
+      assert.deepEqual(source.agent.session.snapshotEvents(), events);
+    } finally { owner[method] = original; }
+  }
+  assert.deepEqual(await f.readStored(source.agent.id), events);
+  assert.equal(f.requests.length, 1);
+  assert.equal((await f.engine.inspect({ sessionId: source.agent.id })).continuation.available, true);
+  await f.engine.execute({ sessionId: source.agent.id, action: 'continue' });
+  await source.agent.whenIdle();
+  assert.equal(f.requests.length, 2);
+  assert.deepEqual(userEvents(source.agent.session.snapshotEvents()), userEvents(events));
 });
 
 test('editing the first message refreshes an auto-generated title without pinning it as a user rename', options, async t => {

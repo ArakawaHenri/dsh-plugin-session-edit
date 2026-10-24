@@ -15,7 +15,7 @@
   "plainTextOnly": "不支持此内容类型",
   "sending": "发送中…",
   "error.forbidden": "无权限",
-  "error.unsupported-runtime": "当前 DSH 版本不受支持",
+  "error.unsupported-runtime": "宿主不支持此操作",
   "error.message-not-editable": "不可编辑",
   "error.session-changed": "会话已变更，请重试",
   "error.source-running": "会话运行中",

@@ -15,7 +15,7 @@
   "plainTextOnly": "Unsupported content",
   "sending": "Sending…",
   "error.forbidden": "Permission denied",
-  "error.unsupported-runtime": "Unsupported DSH version",
+  "error.unsupported-runtime": "Host does not support this operation",
   "error.message-not-editable": "Cannot edit this message",
   "error.session-changed": "Session changed, try again",
   "error.source-running": "Session is running",
